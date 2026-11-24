@@ -152,3 +152,23 @@ Caveats:
   - `/var/swap` on, DAC G20 at 480 Mbps;
   - DHCP got .155, because the IAID differs (`0xcda7926` vs stock `0x6d804853`). Fix at cutover: `[DHCPv4] IAID=0x6d804853` in `eth0.network`.
   - Harmless: `alsactl restore` exit 99, modules-load f/g_taudio2 missing, RTC not set (chrony steps the clock).
+- IAID pin applied on the card (2026-11-24): `[DHCPv4] IAID=1837123667` (= `0x6d804853`) appended to `/etc/systemd/network/eth0.network`, original kept as `/root/eth0.network.orig`. Stock still gets .46 with it.
+
+## SPI NAND dump (2026-11-24, read-only, `re/tools/spinand-dump`)
+- FSP PIO with opcode `0x03` works as the recipe in `re/spinand-read.md` describes (go/no-go passed on the first try). Only `9F`, `0F A0/B0/C0`, `13`, `03` were ever sent. Watchdog armed for 30 s and re-armed per page during the dump, disarmed after (period regs read back 0, no reset).
+- Chip ID `cd eb 11`. Features `a0=00 b0=18 c0=00`. 2048 + 64 byte pages, 64 pages/block, 1024 blocks = 128 MiB, one plane. 0 corrected, 0 uncorrectable pages, no bad-block marks.
+- The CIS in block 0 carries a template ID (`c2 12`, not the live one). Page 1 (PNI) is erased, so there is no partition table.
+- Layout: block 0 CIS, block 10 `IPL_`, block 16 `IPLC`, blocks 22-1023 UBI (VID hdr 0x800, data 0x1000). One UBI volume, `uboot` (static, 4 LEBs): uImage "U-Boot 2022.07-rc2+ for som2d01", built 2022-06-01, load/entry `0x20001000`. No env volume and no CRC-valid env anywhere, so U-Boot runs on its built-in env:
+  - `bootcmd=gpio clear 52; mmc dev 0; ext4load mmc 0:1 ${stage1} ${core}; ext4load mmc 0:1 ${stage2} ${ver}; bootz ${stage1} - ${stage2}`
+  - `stage1=0x22000000`, `stage2=0x22800000`, `core=GustardCore`, `ver=00`, `bootargs=panic=3 rootwait root=/dev/mmcblk0p1 rw clk_ignore_unused`
+  - So `/GustardCore` may be at most 8 MiB (the `/00` load lands at +8 MiB).
+- Files (mode 600 in `re/spinand/`, never publish: they hold the vendor IPL and U-Boot): `nand-oob.bin` (main+spare, 138412032 B), `nand-main.bin`, `ubi/uboot.bin`, `SHA256SUMS`. Blocks 0-127 were read twice, identical.
+
+## Runs 18-21 (13:40-14:03): the boot shim, and a cache bug in the loader
+- `shim/shim.S` + `shim/mkshim.py`: one image (shim | stock zImage | mainline zImage | DTB) that goes in place of `/GustardCore`. It reads PM POR reg1 bit0 (stock soft reboot) and WDT reg2 bit0 (watchdog reset), clears both, and picks: mode 0 stock always; mode 1 mainline only after a stock soft reboot without a watchdog reset; mode 2 mainline unless the watchdog fired. Before mainline it arms the watchdog and copies the DTB to `0x27000000`. QEMU-tested both ways (RAM-backed flag registers, through r26kexec).
+- Run 18 (shim through r26kexec, DTB copied to `0x27000000`): no output, watchdog back to stock. POR bit0 read 0 afterwards (was 1, a WDT reset doesn't clear it), so the shim ran and consumed the flags.
+- Run 19 (same, DTB to `0x21f00000`, inside the loader's copy window): boots.
+- Stock keeps mapped file pages at `0x27000000` (`/proc/kpageflags`). Cause: the copies run with the caches off, while CPU1 is parked by the stock kernel with its caches on and can still hold lines for the destination; the next kernel reads it with caches on. Not observed directly, but the fix below is the only change between run 18 and run 20.
+- Fix: invalidate the destination by MVA (DCIMVAC, broadcast) before and after every uncached copy, in the shim's DTB copy and in the trampoline's page copy (now 228 bytes). Run 20 (shim fix only, DTB at `0x27000000`): boots. Run 21 (trampoline fix too): boots, DAC at high speed, init ready at 7.6 s.
+- LLVM's assembler leaves every `bl` as an `R_ARM_CALL` relocation, even to a `.L` label, so both flat binaries are now linked with `ld.lld` before `objcopy`.
+- Not tested on hardware: the shim's stock branch (a plain jump, QEMU only) and the real U-Boot path. A failure there would not self-recover (nothing arms the watchdog before the shim decides), so installing it on the card waits for Noa.

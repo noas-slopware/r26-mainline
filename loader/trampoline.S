@@ -39,11 +39,22 @@ entry_loop:
 	cmp	r5, #0
 	beq	next_page
 	ldmia	r12!, {r7, r8}		@ dst, src
+	/*
+	 * The copy runs with the caches off, but CPU1 is parked by the stock
+	 * kernel with its caches on and may hold stale lines for dst; the next
+	 * kernel reads dst with caches on and would get them. Invalidate the
+	 * page by MVA (broadcast) before and after the copy.
+	 */
+	mov	r0, r7
+	bl	.Linval_page
+	mov	r10, r7
 	mov	r9, #256		@ 256 x 16 bytes = one page
 1:	ldmia	r8!, {r0-r3}
 	stmia	r7!, {r0-r3}
 	subs	r9, r9, #1
 	bne	1b
+	mov	r0, r10
+	bl	.Linval_page
 	sub	r5, r5, #1
 	b	entry_loop
 
@@ -66,6 +77,20 @@ done:
 	mov	r0, #0
 	mvn	r1, #0			@ machine type ~0: DT boot
 	bx	r3
+
+/* .Linval_page(r0 = page): DCIMVAC over 4096 bytes. Clobbers r0-r3. */
+.Linval_page:
+	mrc	p15, 0, r3, c0, c0, 1	@ CTR
+	ubfx	r3, r3, #16, #4		@ DminLine: log2(words per line)
+	mov	r2, #4
+	lsl	r3, r2, r3		@ line size in bytes
+	add	r1, r0, #4096
+2:	mcr	p15, 0, r0, c7, c6, 1	@ DCIMVAC
+	add	r0, r0, r3
+	cmp	r0, r1
+	blo	2b
+	dsb
+	bx	lr
 
 	.align	2
 

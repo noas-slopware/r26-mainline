@@ -4,7 +4,8 @@ Mainline Linux on the network streamer inside the Gustard R26 DAC (SigmaStar SSD
 2x Cortex-A7, 128 MiB). The stock kernel is a vendor 4.9.84 with no source released.
 
 Status (stable v7.3.6): Debian 12 boots on it with every service up, started from the running stock
-system by the `r26kexec` loader. Booting it from the stock U-Boot is not done yet. See `PORT-STATUS.md`.
+system by the `r26kexec` loader. The boot shim that lets the stock U-Boot start it is written and tested
+through the loader, but not installed yet. See `PORT-STATUS.md`.
 
 | Part | State |
 |---|---|
@@ -13,7 +14,7 @@ system by the `r26kexec` loader. Booting it from the stock U-Boot is not done ye
 | SD host (new `sstar-sdio` driver) | works, verified byte-exact reads and writes |
 | clocks, pinctrl, GPIO, interrupts, RTC | from linux-chenxing, working |
 | uart0 | ns16550a, pins on the board unknown |
-| boot via U-Boot | not yet (needs a recovery shim, in progress) |
+| boot via U-Boot | `shim/`: tested through the loader, not yet installed in place of `/GustardCore` |
 
 ## Layout
 
@@ -25,8 +26,9 @@ system by the `r26kexec` loader. Booting it from the stock U-Boot is not done ye
 | `build.sh` | fetch v7.3.6, apply the series, build `zImage` + DTB (`./build.sh test` for a test kernel) |
 | `loader/` | `r26kexec`: start a new kernel from the running stock 4.9 kernel through `/dev/mem`, with the hardware watchdog as a hard deadline back to stock |
 | `initramfs/` | test initramfs (busybox, dropbear, netconsole/UDP logging, optional switch_root to the SD rootfs) |
+| `shim/` | boot shim: one `/GustardCore` image holding the stock and mainline kernels; picks one per boot from the reset-cause registers, so power-on, a watchdog reset and mainline's own reboot always land on stock |
 | `sim/` | QEMU rehearsal of the loader |
-| `re/` | reverse-engineering notes and tools: vendor kernel function matching, the SD host and USB init specs |
+| `re/` | reverse-engineering notes and tools: vendor kernel function matching, the SD host and USB init specs, a read-only SPI NAND dumper (`re/tools/spinand-dump`, recipe in `re/spinand-read.md`) |
 
 ## Notes
 

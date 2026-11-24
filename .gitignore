@@ -1,3 +1,7 @@
 out/
 initramfs/out/
 loader/out/
+shim/out/
+re/tools/*/riuread
+re/tools/*/riuw1c
+re/tools/*/spinand-dump
