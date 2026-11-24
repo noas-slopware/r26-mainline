@@ -1,0 +1,765 @@
+From 57577fe6ca95848d83702df765f3d34ced233dcb Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 13:26:55 +0900
+Subject: [PATCH 11/14] mmc: add a SigmaStar SSD20xD SD host controller driver
+
+New driver for the SD host ("SDIO v5") of SigmaStar SSD20xD
+(Infinity2M) SoCs. The register programming follows the vendor HAL that
+ships, byte-identical, in the Gustard R26 kernel: every command rewrites
+the register block, data moves by ADMA, reads run as one job and writes
+as a command job followed by a data job, CMD12 is sent by hand, R1b
+waits on BUSY_DET_ON/BUSY_END, and the bogus response CRC error on R3
+is cleared. The ERR_STS interrupt is never enabled.
+
+The MIU write pipe flush the vendor does after building the ADMA table
+is what wmb() already does on MStar v7 (ARM_HEAVY_MB/l3bridge).
+
+Tested on the Gustard R26: byte-exact reads and writes, ext4 rootfs.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/mmc/host/Kconfig      |   8 +
+ drivers/mmc/host/Makefile     |   1 +
+ drivers/mmc/host/sstar-sdio.c | 702 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 711 insertions(+)
+ create mode 100644 drivers/mmc/host/sstar-sdio.c
+
+diff --git a/drivers/mmc/host/Kconfig b/drivers/mmc/host/Kconfig
+index 4f060d3e56..a6ab165bd7 100644
+--- a/drivers/mmc/host/Kconfig
++++ b/drivers/mmc/host/Kconfig
+@@ -367,6 +367,14 @@ config MMC_SDHCI_S3C
+ 
+ 	  If unsure, say N.
+ 
++config MMC_SSTAR_SDIO
++	tristate "SigmaStar SSD20xD SD host controller"
++	depends on ARCH_MSTARV7 || COMPILE_TEST
++	depends on HAS_DMA
++	help
++	  This selects the SD card host controller ("SDIO v5") found in
++	  SigmaStar SSD20xD (Infinity2M) SoCs.
++
+ config MMC_SDHCI_PXAV3
+ 	tristate "Marvell MMP2 SD Host Controller support (PXAV3)"
+ 	depends on HAVE_CLK
+diff --git a/drivers/mmc/host/Makefile b/drivers/mmc/host/Makefile
+index ee412e6b84..6f36014393 100644
+--- a/drivers/mmc/host/Makefile
++++ b/drivers/mmc/host/Makefile
+@@ -115,3 +115,4 @@ endif
+ 
+ obj-$(CONFIG_MMC_SDHCI_XENON)	+= sdhci-xenon-driver.o
+ sdhci-xenon-driver-y		+= sdhci-xenon.o sdhci-xenon-phy.o
++obj-$(CONFIG_MMC_SSTAR_SDIO)		+= sstar-sdio.o
+diff --git a/drivers/mmc/host/sstar-sdio.c b/drivers/mmc/host/sstar-sdio.c
+new file mode 100644
+index 0000000000..2a69c4b4b5
+--- /dev/null
++++ b/drivers/mmc/host/sstar-sdio.c
+@@ -0,0 +1,702 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * SigmaStar SSD20xD (Infinity2M) SD host controller ("SDIO v5").
++ *
++ * The register programming follows the vendor HAL (drivers/sstar/sdmmc,
++ * hal_sdmmc_v5.c and infinity2m/hal_card_platform.c of the SigmaStar 4.9
++ * SDK), which ships byte-identical in the Gustard R26 streamer kernel:
++ * every command rewrites the whole register block, data always moves by
++ * ADMA, reads run as one job and writes as a command job followed by a
++ * data job, CMD12 is sent by hand.
++ *
++ * The ERR_STS interrupt is never enabled: the vendor sets ERR_DET_ON on
++ * every command (including reads with DTRX_EN), which only avoids an
++ * error-interrupt storm because ERR_STS stays masked. Errors are read
++ * from SD_STS after the command/data events instead.
++ */
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/mmc/host.h>
++#include <linux/mmc/mmc.h>
++#include <linux/mmc/slot-gpio.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/scatterlist.h>
++#include <linux/spinlock.h>
++#include <linux/wait.h>
++
++/* 16-bit registers on a 4-byte stride */
++#define SDIO_REG(n)		((n) * 4)
++
++#define SDIO_MIE_EVENT		0x00
++#define SDIO_MIE_INT_EN		0x01
++#define SDIO_MMA_PRI		0x02
++#define SDIO_DMA_ADDR_L		0x03
++#define SDIO_DMA_ADDR_H		0x04
++#define SDIO_DMA_LEN_L		0x05
++#define SDIO_DMA_LEN_H		0x06
++#define SDIO_MIE_FUNC_CTL	0x07
++#define SDIO_JOB_BLK_CNT	0x08
++#define SDIO_BLK_SIZE		0x09
++#define SDIO_CMD_RSP_SIZE	0x0a
++#define SDIO_SD_MODE		0x0b
++#define SDIO_SD_CTL		0x0c
++#define SDIO_SD_STS		0x0d
++#define SDIO_BOOT_MOD		0x0e
++#define SDIO_DDR_MOD		0x0f
++#define SDIO_SDIO_MOD		0x11
++#define SDIO_CFIFO		0x20
++#define SDIO_BOOT		0x37
++#define SDIO_FCIE_RST		0x3f
++
++#define MIE_DATA_END		BIT(0)
++#define MIE_CMD_END		BIT(1)
++#define MIE_ERR_STS		BIT(2)
++#define MIE_SDIO_INT		BIT(3)
++#define MIE_BUSY_END		BIT(4)
++#define MIE_R2N_RDY		BIT(5)
++#define MIE_CLEAR_MASK		(MIE_DATA_END | MIE_CMD_END | MIE_ERR_STS | \
++				 MIE_BUSY_END | MIE_R2N_RDY)
++#define MIE_ISR_ACK_MASK	(MIE_DATA_END | MIE_CMD_END | MIE_BUSY_END)
++/* vendor V_MIE_INT_EN_INIT: ERR_STS deliberately left out */
++#define MIE_INT_EN_INIT		(MIE_DATA_END | MIE_CMD_END | MIE_SDIO_INT | \
++				 MIE_BUSY_END)
++
++#define MMA_PRI_INIT		0x0033	/* R/W priority, burst 8, MIU0 */
++#define FUNC_CTL_SDIO_MODE	0x0004
++#define CMD_SIZE_5		(5 << 8)
++
++#define SD_MODE_CLK_EN		BIT(0)
++#define SD_MODE_BUS_4BIT	BIT(1)
++#define SD_MODE_DMA_RD_CLK_STOP	BIT(7)
++
++#define SD_CTL_RSPR2_EN		BIT(0)
++#define SD_CTL_RSP_EN		BIT(1)
++#define SD_CTL_CMD_EN		BIT(2)
++#define SD_CTL_DTRX_EN		BIT(3)
++#define SD_CTL_JOB_DIR		BIT(4)	/* 1 = write */
++#define SD_CTL_ADMA_EN		BIT(5)
++#define SD_CTL_JOB_START	BIT(6)
++#define SD_CTL_BUSY_DET_ON	BIT(8)
++#define SD_CTL_ERR_DET_ON	BIT(9)
++
++#define SD_STS_RD_CERR		BIT(0)
++#define SD_STS_WR_CERR		BIT(1)
++#define SD_STS_WR_TOUT		BIT(2)
++#define SD_STS_NORSP		BIT(3)
++#define SD_STS_RSP_CERR		BIT(4)
++#define SD_STS_RD_TOUT		BIT(5)
++#define SD_STS_ERR_MASK		0x003f
++
++/* software error codes, above the SD_STS bits like the vendor's */
++#define ERR_RIU			BIT(6)	/* status/events would not clear */
++#define ERR_DAT0_BUSY		BIT(7)	/* busy wait timed out */
++#define ERR_MIE_TOUT		BIT(8)	/* event wait timed out */
++#define ERR_NEEDS_RESET		(ERR_RIU | ERR_DAT0_BUSY | ERR_MIE_TOUT)
++
++#define BOOT_MOD_BOOT_MODE	BIT(2)
++#define BOOT_CLR_MASK		0x0007
++#define DDR_MOD_INIT		0x6400	/* PAD_CLK_SEL | PAD_IN_SEL | FALL_LATCH */
++#define SDIO_MOD_INIT		0x0008
++
++#define FCIE_RST_SOFT		BIT(0)	/* active low */
++#define FCIE_RST_STS_MASK	0x000e
++
++/* CLKGEN SDIO clock register: mux in [4:2], [1:0] cleared to run */
++#define CLKGEN_SDIO_MASK	0x001f
++#define CLKGEN_SDIO_MUX		GENMASK(4, 2)
++/* SC_GP_CTRL: select the FCIE/SPI clock source */
++#define SCGP_SDIO_SRC		BIT(3)
++/* CHIPTOP pad config */
++#define PADMUX_SDIO_MODE	GENMASK(9, 8)
++#define PADMUX_SDIO_MODE_1	1
++#define PADCFG_DRIVE		0x003f	/* CLK, D3..D0, CMD */
++#define PADCFG_PULL		0x1f00	/* D3..D0, CMD */
++
++#define WT_RSP_MS		10
++#define WT_READ_MS		2000
++#define WT_WRITE_MS		3000
++#define WT_BUSY_MS		1000
++#define WT_RISK_MS		10
++
++#define ADMA_MAX_DESC		128
++#define ADMA_DESC_END		BIT(0)
++
++struct sstar_adma_desc {
++	__le32 ctrl;	/* [31:16] block count, [2:1] MIU sel, [0] end */
++	__le32 addr;	/* MIU address */
++	__le32 len;
++	__le32 pad;
++};
++
++struct sstar_sdio {
++	struct device *dev;
++	struct mmc_host *mmc;
++	void __iomem *base;
++	void __iomem *clkgen;
++	void __iomem *scgp;
++	void __iomem *padmux;
++	void __iomem *padcfg;
++
++	spinlock_t lock;
++	wait_queue_head_t wq;
++	u16 events;		/* accumulated MIE events, cleared per command */
++
++	u16 bus_width;		/* SD_MODE bus width bits */
++	unsigned int nrc_us;
++	unsigned int clock;
++
++	struct sstar_adma_desc *adma;
++	dma_addr_t adma_dma;
++};
++
++/* Mux index -> rate; vendor table, fastest first */
++static const unsigned int sstar_sdio_clk_table[] = {
++	48000000, 43200000, 40000000, 36000000,
++	32000000, 20000000, 12000000, 300000,
++};
++
++static inline u16 sdio_r(struct sstar_sdio *h, unsigned int reg)
++{
++	return readw(h->base + SDIO_REG(reg));
++}
++
++static inline void sdio_w(struct sstar_sdio *h, unsigned int reg, u16 val)
++{
++	writew(val, h->base + SDIO_REG(reg));
++}
++
++static inline void sdio_rmw(struct sstar_sdio *h, unsigned int reg, u16 clr,
++			    u16 set)
++{
++	sdio_w(h, reg, (sdio_r(h, reg) & ~clr) | set);
++}
++
++static void sstar_sdio_reset_ip(struct sstar_sdio *h)
++{
++	u16 v;
++
++	sdio_rmw(h, SDIO_SD_CTL, SD_CTL_JOB_START, 0);
++	sdio_rmw(h, SDIO_FCIE_RST, FCIE_RST_SOFT, 0);
++	if (readw_poll_timeout_atomic(h->base + SDIO_REG(SDIO_FCIE_RST), v,
++				      (v & FCIE_RST_STS_MASK) == FCIE_RST_STS_MASK,
++				      1, 100000))
++		dev_warn(h->dev, "IP reset assert timed out\n");
++	sdio_rmw(h, SDIO_FCIE_RST, 0, FCIE_RST_SOFT);
++	if (readw_poll_timeout_atomic(h->base + SDIO_REG(SDIO_FCIE_RST), v,
++				      !(v & FCIE_RST_STS_MASK), 1, 100000))
++		dev_warn(h->dev, "IP reset release timed out\n");
++}
++
++static int sstar_sdio_clear_status(struct sstar_sdio *h)
++{
++	int i;
++
++	for (i = 0; i < 4; i++) {
++		sdio_rmw(h, SDIO_SD_STS, 0, SD_STS_ERR_MASK);
++		if (!(sdio_r(h, SDIO_SD_STS) & SD_STS_ERR_MASK))
++			return 0;
++	}
++	return -EIO;
++}
++
++static int sstar_sdio_clear_events(struct sstar_sdio *h)
++{
++	unsigned long flags;
++	int i, ret = -EIO;
++
++	spin_lock_irqsave(&h->lock, flags);
++	for (i = 0; i < 4; i++) {
++		sdio_w(h, SDIO_MIE_EVENT, MIE_CLEAR_MASK);
++		if (!(sdio_r(h, SDIO_MIE_EVENT) & MIE_CLEAR_MASK)) {
++			ret = 0;
++			break;
++		}
++	}
++	h->events = 0;
++	spin_unlock_irqrestore(&h->lock, flags);
++
++	return ret;
++}
++
++static bool sstar_sdio_events_done(struct sstar_sdio *h, u16 want)
++{
++	unsigned long flags;
++	bool done;
++
++	spin_lock_irqsave(&h->lock, flags);
++	done = (h->events & want) == want;
++	spin_unlock_irqrestore(&h->lock, flags);
++
++	return done;
++}
++
++static int sstar_sdio_wait(struct sstar_sdio *h, u16 want, unsigned int ms)
++{
++	if (wait_event_timeout(h->wq, sstar_sdio_events_done(h, want),
++			       msecs_to_jiffies(ms + WT_RISK_MS)))
++		return 0;
++	/* one last look, the interrupt may have raced the timeout */
++	return sstar_sdio_events_done(h, want) ? 0 : -ETIMEDOUT;
++}
++
++static irqreturn_t sstar_sdio_irq(int irq, void *dev_id)
++{
++	struct sstar_sdio *h = dev_id;
++	u16 ev, en;
++
++	spin_lock(&h->lock);
++	ev = sdio_r(h, SDIO_MIE_EVENT);
++	h->events |= ev;
++	en = sdio_r(h, SDIO_MIE_INT_EN);
++	/* acknowledge only the enabled completion events that fired */
++	sdio_w(h, SDIO_MIE_EVENT, ev & en & MIE_ISR_ACK_MASK);
++	if (h->events & MIE_BUSY_END) {
++		sdio_rmw(h, SDIO_SD_CTL, SD_CTL_BUSY_DET_ON, 0);
++		sdio_rmw(h, SDIO_MIE_INT_EN, MIE_BUSY_END, 0);
++	}
++	spin_unlock(&h->lock);
++
++	wake_up(&h->wq);
++	return IRQ_HANDLED;
++}
++
++static void sstar_sdio_read_resp(struct sstar_sdio *h, struct mmc_command *cmd,
++				 unsigned int size)
++{
++	u8 b[16] = { 0 };
++	unsigned int i;
++
++	for (i = 0; i < size; i += 2) {
++		u16 hw = sdio_r(h, SDIO_CFIFO + i / 2);
++
++		b[i] = hw & 0xff;
++		if (i + 1 < size)
++			b[i + 1] = hw >> 8;
++	}
++
++	/* b[0] is the command index / header byte, the CRC is not delivered */
++	cmd->resp[0] = b[1] << 24 | b[2] << 16 | b[3] << 8 | b[4];
++	if (size == 16) {
++		cmd->resp[1] = b[5] << 24 | b[6] << 16 | b[7] << 8 | b[8];
++		cmd->resp[2] = b[9] << 24 | b[10] << 16 | b[11] << 8 | b[12];
++		cmd->resp[3] = b[13] << 24 | b[14] << 16 | b[15] << 8;
++	}
++}
++
++/*
++ * Run one command (and its data phase). Returns the vendor-style error
++ * code: SD_STS error bits plus the software codes above, 0 on success.
++ */
++static u32 sstar_sdio_xfer(struct sstar_sdio *h, struct mmc_command *cmd,
++			   struct mmc_data *data, bool close_clk)
++{
++	bool write = data && (data->flags & MMC_DATA_WRITE);
++	u32 arg = cmd->arg;
++	unsigned int rsp_size = 0;
++	u16 ctl = SD_CTL_ERR_DET_ON | SD_CTL_CMD_EN;
++	u32 err = 0;
++
++	if (cmd->flags & MMC_RSP_PRESENT) {
++		if (cmd->flags & MMC_RSP_136) {
++			rsp_size = 16;
++			ctl |= SD_CTL_RSPR2_EN | SD_CTL_RSP_EN;
++		} else {
++			rsp_size = 5;
++			ctl |= SD_CTL_RSP_EN;
++		}
++	}
++	if (write)
++		ctl |= SD_CTL_JOB_DIR;
++	if (data)
++		ctl |= SD_CTL_ADMA_EN;
++
++	/* command token: 0x40|opcode, arg MSB first */
++	sdio_w(h, SDIO_CFIFO + 0, ((arg >> 24) << 8) | (0x40 | cmd->opcode));
++	sdio_w(h, SDIO_CFIFO + 1, (((arg >> 8) & 0xff) << 8) | ((arg >> 16) & 0xff));
++	sdio_w(h, SDIO_CFIFO + 2, arg & 0xff);
++
++	if (data) {
++		sdio_w(h, SDIO_BLK_SIZE, data->blksz);
++		sdio_w(h, SDIO_JOB_BLK_CNT, 1);
++		sdio_w(h, SDIO_DMA_LEN_L, sizeof(struct sstar_adma_desc));
++		sdio_w(h, SDIO_DMA_LEN_H, 0);
++		sdio_w(h, SDIO_DMA_ADDR_L, lower_16_bits(h->adma_dma));
++		sdio_w(h, SDIO_DMA_ADDR_H, upper_16_bits(h->adma_dma));
++	}
++
++	sdio_w(h, SDIO_CMD_RSP_SIZE, CMD_SIZE_5 | rsp_size);
++	sdio_w(h, SDIO_MIE_FUNC_CTL, FUNC_CTL_SDIO_MODE);
++	sdio_w(h, SDIO_SD_MODE, SD_MODE_CLK_EN | h->bus_width);
++	sdio_w(h, SDIO_SD_CTL, ctl);
++	sdio_w(h, SDIO_SDIO_MOD, SDIO_MOD_INIT);
++	sdio_rmw(h, SDIO_BOOT_MOD, BOOT_MOD_BOOT_MODE, 0);
++	sdio_rmw(h, SDIO_BOOT, BOOT_CLR_MASK, 0);
++	sdio_w(h, SDIO_MMA_PRI, MMA_PRI_INIT);
++	sdio_w(h, SDIO_DDR_MOD, DDR_MOD_INIT);
++
++	udelay(h->nrc_us);
++
++	if (sstar_sdio_clear_status(h) || sstar_sdio_clear_events(h)) {
++		err = ERR_RIU;
++		goto out;
++	}
++	sdio_w(h, SDIO_MIE_INT_EN, MIE_INT_EN_INIT);
++
++	if (data && !write) {
++		/* read: command and data phase in one job */
++		sdio_rmw(h, SDIO_SD_CTL, 0, SD_CTL_DTRX_EN);
++		sdio_rmw(h, SDIO_SD_CTL, 0, SD_CTL_DTRX_EN | SD_CTL_JOB_START);
++		if (sstar_sdio_wait(h, MIE_CMD_END | MIE_DATA_END,
++				    WT_RSP_MS + WT_READ_MS))
++			err |= ERR_MIE_TOUT;
++	} else {
++		sdio_rmw(h, SDIO_SD_CTL, 0, SD_CTL_JOB_START);
++		if (sstar_sdio_wait(h, MIE_CMD_END, WT_RSP_MS))
++			err |= ERR_MIE_TOUT;
++	}
++	if (err)
++		goto out;
++
++	if (rsp_size)
++		sstar_sdio_read_resp(h, cmd, rsp_size);
++
++	if (cmd->flags & MMC_RSP_BUSY) {
++		if (sstar_sdio_clear_events(h)) {
++			err = ERR_RIU;
++			goto out;
++		}
++		sdio_rmw(h, SDIO_SD_CTL, 0, SD_CTL_BUSY_DET_ON);
++		if (sstar_sdio_wait(h, MIE_BUSY_END, WT_BUSY_MS)) {
++			err = ERR_DAT0_BUSY;
++			goto out;
++		}
++	}
++
++	/* R3/R4 carry no CRC, but the IP flags a response CRC error anyway */
++	if ((cmd->flags & MMC_RSP_PRESENT) && !(cmd->flags & MMC_RSP_CRC))
++		sdio_w(h, SDIO_SD_STS, SD_STS_RSP_CERR);
++
++	err |= sdio_r(h, SDIO_SD_STS) & SD_STS_ERR_MASK;
++
++	if (write && !err) {
++		/* write: separate data job after the command job */
++		if (sstar_sdio_clear_status(h) || sstar_sdio_clear_events(h)) {
++			err = ERR_RIU;
++			goto out;
++		}
++		sdio_w(h, SDIO_SD_CTL, SD_CTL_JOB_DIR | SD_CTL_ADMA_EN);
++		sdio_rmw(h, SDIO_SD_CTL, 0, SD_CTL_DTRX_EN);
++		sdio_rmw(h, SDIO_SD_CTL, 0, SD_CTL_DTRX_EN | SD_CTL_JOB_START);
++		if (sstar_sdio_wait(h, MIE_DATA_END, WT_WRITE_MS))
++			err |= ERR_MIE_TOUT;
++		err |= sdio_r(h, SDIO_SD_STS) & SD_STS_ERR_MASK;
++	}
++
++out:
++	if (err & ERR_NEEDS_RESET)
++		sstar_sdio_reset_ip(h);
++	if (close_clk)
++		sdio_rmw(h, SDIO_SD_MODE,
++			 SD_MODE_CLK_EN | SD_MODE_DMA_RD_CLK_STOP, 0);
++	return err;
++}
++
++static int sstar_sdio_cmd_errno(u32 err)
++{
++	if (err & (SD_STS_NORSP | ERR_MIE_TOUT | ERR_DAT0_BUSY))
++		return -ETIMEDOUT;
++	if (err & SD_STS_RSP_CERR)
++		return -EILSEQ;
++	if (err & ERR_RIU)
++		return -EIO;
++	return 0;
++}
++
++static int sstar_sdio_data_errno(u32 err)
++{
++	if (err & (SD_STS_RD_CERR | SD_STS_WR_CERR))
++		return -EILSEQ;
++	if (err & (SD_STS_RD_TOUT | SD_STS_WR_TOUT | ERR_MIE_TOUT))
++		return -ETIMEDOUT;
++	if (err)
++		return -EIO;
++	return 0;
++}
++
++static int sstar_sdio_map_data(struct sstar_sdio *h, struct mmc_data *data)
++{
++	struct scatterlist *sg;
++	int i, n;
++
++	n = dma_map_sg(h->dev, data->sg, data->sg_len, mmc_get_dma_dir(data));
++	if (n <= 0)
++		return -ENOMEM;
++	data->sg_count = n;
++
++	for_each_sg(data->sg, sg, n, i) {
++		struct sstar_adma_desc *d = &h->adma[i];
++		u32 len = sg_dma_len(sg);
++
++		d->ctrl = cpu_to_le32(((len / data->blksz) << 16) |
++				      (i == n - 1 ? ADMA_DESC_END : 0));
++		d->addr = cpu_to_le32(lower_32_bits(sg_dma_address(sg)));
++		d->len = cpu_to_le32(len);
++		d->pad = 0;
++	}
++	/*
++	 * On MStar v7 the heavy barrier also flushes the MIU write pipe,
++	 * which is what the vendor's Chip_Flush_MIU_Pipe() does here.
++	 */
++	wmb();
++	return 0;
++}
++
++static void sstar_sdio_request(struct mmc_host *mmc, struct mmc_request *mrq)
++{
++	struct sstar_sdio *h = mmc_priv(mmc);
++	struct mmc_command *cmd = mrq->cmd;
++	struct mmc_data *data = mrq->data;
++	u32 err;
++
++	if (data) {
++		int ret = sstar_sdio_map_data(h, data);
++
++		if (ret) {
++			data->error = ret;
++			mmc_request_done(mmc, mrq);
++			return;
++		}
++	}
++
++	/* keep the card clock running into the stop command */
++	err = sstar_sdio_xfer(h, cmd, data, !(data && mrq->stop));
++
++	cmd->error = sstar_sdio_cmd_errno(err);
++	if (data) {
++		if (!cmd->error) {
++			data->error = sstar_sdio_data_errno(err);
++			if (!data->error)
++				data->bytes_xfered = data->blksz * data->blocks;
++		}
++		dma_unmap_sg(h->dev, data->sg, data->sg_len,
++			     mmc_get_dma_dir(data));
++
++		/* vendor sends the stop even after a failed data command */
++		if (mrq->stop)
++			mrq->stop->error = sstar_sdio_cmd_errno(
++				sstar_sdio_xfer(h, mrq->stop, NULL, true));
++	}
++
++	mmc_request_done(mmc, mrq);
++}
++
++static unsigned int sstar_sdio_nrc_us(unsigned int hz)
++{
++	if (hz >= 8000000)
++		return 1;
++	if (hz >= 4000000)
++		return 2;
++	if (hz >= 2000000)
++		return 4;
++	if (hz >= 1000000)
++		return 8;
++	if (hz >= 400000)
++		return 20;
++	if (hz >= 300000)
++		return 27;
++	if (hz >= 100000)
++		return 81;
++	return 100;
++}
++
++static void sstar_sdio_set_clock(struct sstar_sdio *h, unsigned int req)
++{
++	unsigned int i, idx = ARRAY_SIZE(sstar_sdio_clk_table) - 1;
++
++	for (i = 0; i < ARRAY_SIZE(sstar_sdio_clk_table); i++) {
++		if (req >= sstar_sdio_clk_table[i]) {
++			idx = i;
++			break;
++		}
++	}
++
++	/* stop the card clock while the source changes */
++	sdio_w(h, SDIO_MIE_FUNC_CTL, FUNC_CTL_SDIO_MODE);
++	sdio_rmw(h, SDIO_SD_MODE, SD_MODE_CLK_EN, 0);
++
++	writew(readw(h->scgp) | SCGP_SDIO_SRC, h->scgp);
++	writew((readw(h->clkgen) & ~CLKGEN_SDIO_MASK) |
++	       FIELD_PREP(CLKGEN_SDIO_MUX, idx), h->clkgen);
++
++	sdio_w(h, SDIO_MIE_FUNC_CTL, FUNC_CTL_SDIO_MODE);
++	sdio_rmw(h, SDIO_SD_MODE, 0, SD_MODE_CLK_EN);
++
++	h->clock = sstar_sdio_clk_table[idx];
++	h->nrc_us = sstar_sdio_nrc_us(h->clock);
++	h->mmc->actual_clock = h->clock;
++	dev_dbg(h->dev, "clock %u Hz -> %u Hz\n", req, h->clock);
++}
++
++static void sstar_sdio_pads(struct sstar_sdio *h, bool on)
++{
++	if (on) {
++		writew((readw(h->padmux) & ~PADMUX_SDIO_MODE) |
++		       FIELD_PREP(PADMUX_SDIO_MODE, PADMUX_SDIO_MODE_1), h->padmux);
++		writew(readw(h->padcfg) | PADCFG_DRIVE | PADCFG_PULL, h->padcfg);
++	} else {
++		writew(readw(h->padcfg) & ~PADCFG_PULL, h->padcfg);
++	}
++}
++
++static void sstar_sdio_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
++{
++	struct sstar_sdio *h = mmc_priv(mmc);
++
++	switch (ios->power_mode) {
++	case MMC_POWER_UP:
++		sstar_sdio_pads(h, true);
++		msleep(1);
++		break;
++	case MMC_POWER_ON:
++		sdio_w(h, SDIO_MIE_FUNC_CTL, FUNC_CTL_SDIO_MODE);
++		sdio_rmw(h, SDIO_SD_MODE, 0, SD_MODE_CLK_EN);
++		sstar_sdio_reset_ip(h);
++		msleep(1);
++		break;
++	case MMC_POWER_OFF:
++		sdio_rmw(h, SDIO_SD_MODE, SD_MODE_CLK_EN, 0);
++		sstar_sdio_pads(h, false);
++		msleep(30);
++		break;
++	default:
++		break;
++	}
++
++	if (ios->clock && ios->clock != h->clock)
++		sstar_sdio_set_clock(h, ios->clock);
++
++	h->bus_width = ios->bus_width == MMC_BUS_WIDTH_4 ? SD_MODE_BUS_4BIT : 0;
++	/* no per-timing tuning: DDR_MOD is the same at every speed */
++}
++
++static const struct mmc_host_ops sstar_sdio_ops = {
++	.request	= sstar_sdio_request,
++	.set_ios	= sstar_sdio_set_ios,
++	.get_cd		= mmc_gpio_get_cd,
++	.get_ro		= mmc_gpio_get_ro,
++};
++
++static void __iomem *sstar_sdio_map(struct platform_device *pdev,
++				    const char *name)
++{
++	struct resource *res;
++
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++	if (!res)
++		return IOMEM_ERR_PTR(-ENODEV);
++	/* these registers are shared with clock/pinctrl banks: no request */
++	return devm_ioremap(&pdev->dev, res->start, resource_size(res)) ?:
++	       IOMEM_ERR_PTR(-ENOMEM);
++}
++
++static int sstar_sdio_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mmc_host *mmc;
++	struct sstar_sdio *h;
++	int irq, ret;
++
++	mmc = devm_mmc_alloc_host(dev, sizeof(*h));
++	if (!mmc)
++		return -ENOMEM;
++	h = mmc_priv(mmc);
++	h->dev = dev;
++	h->mmc = mmc;
++	spin_lock_init(&h->lock);
++	init_waitqueue_head(&h->wq);
++
++	h->base = devm_platform_ioremap_resource_byname(pdev, "sdio");
++	if (IS_ERR(h->base))
++		return PTR_ERR(h->base);
++	h->clkgen = sstar_sdio_map(pdev, "clkgen");
++	h->scgp = sstar_sdio_map(pdev, "scgp");
++	h->padmux = sstar_sdio_map(pdev, "padmux");
++	h->padcfg = sstar_sdio_map(pdev, "padcfg");
++	if (IS_ERR(h->clkgen) || IS_ERR(h->scgp) || IS_ERR(h->padmux) ||
++	    IS_ERR(h->padcfg))
++		return dev_err_probe(dev, -ENODEV, "missing register ranges\n");
++
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		return ret;
++	h->adma = dmam_alloc_coherent(dev, ADMA_MAX_DESC * sizeof(*h->adma),
++				      &h->adma_dma, GFP_KERNEL);
++	if (!h->adma)
++		return -ENOMEM;
++
++	irq = platform_get_irq(pdev, 0);
++	if (irq < 0)
++		return irq;
++
++	/* quiet controller before the interrupt can fire */
++	sdio_w(h, SDIO_MIE_INT_EN, 0);
++	sdio_w(h, SDIO_MIE_EVENT, MIE_CLEAR_MASK);
++	sstar_sdio_reset_ip(h);
++
++	ret = devm_request_irq(dev, irq, sstar_sdio_irq, 0, dev_name(dev), h);
++	if (ret)
++		return ret;
++
++	mmc->ops = &sstar_sdio_ops;
++	mmc->f_min = sstar_sdio_clk_table[ARRAY_SIZE(sstar_sdio_clk_table) - 1];
++	mmc->f_max = sstar_sdio_clk_table[0];
++	mmc->ocr_avail = MMC_VDD_32_33 | MMC_VDD_33_34;
++	mmc->caps = MMC_CAP_4_BIT_DATA | MMC_CAP_SD_HIGHSPEED |
++		    MMC_CAP_MMC_HIGHSPEED;
++	mmc->caps2 = MMC_CAP2_NO_SDIO;
++	mmc->max_segs = ADMA_MAX_DESC;
++	mmc->max_blk_size = 512;
++	mmc->max_blk_count = 1024;
++	mmc->max_req_size = 512 * 1024;
++	mmc->max_seg_size = 512 * 1024;
++
++	ret = mmc_of_parse(mmc);
++	if (ret)
++		return ret;
++
++	platform_set_drvdata(pdev, mmc);
++	return mmc_add_host(mmc);
++}
++
++static void sstar_sdio_remove(struct platform_device *pdev)
++{
++	struct mmc_host *mmc = platform_get_drvdata(pdev);
++
++	mmc_remove_host(mmc);
++}
++
++static const struct of_device_id sstar_sdio_of_match[] = {
++	{ .compatible = "sstar,ssd20xd-sdio" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sstar_sdio_of_match);
++
++static struct platform_driver sstar_sdio_driver = {
++	.probe = sstar_sdio_probe,
++	.remove = sstar_sdio_remove,
++	.driver = {
++		.name = "sstar-sdio",
++		.of_match_table = sstar_sdio_of_match,
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
++	},
++};
++module_platform_driver(sstar_sdio_driver);
++
++MODULE_DESCRIPTION("SigmaStar SSD20xD SD host controller");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

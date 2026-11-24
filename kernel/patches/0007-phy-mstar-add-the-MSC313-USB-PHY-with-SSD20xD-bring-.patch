@@ -1,0 +1,694 @@
+From 9e3fdbb77849bbf3d9abc58643a3adfe7c24867b Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 13:26:55 +0900
+Subject: [PATCH 07/14] phy: mstar: add the MSC313 USB PHY with SSD20xD
+ bring-up
+
+Add the MStar MSC313 USB PHY (UTMI) driver from linux-chenxing, plus a
+sstar,ssd20xd-usb-phy variant whose phy_init()/phy_power_on() replay the
+vendor Titania3_series_start_ehc() UTMI/USBC sequence for SSD20xD byte
+for byte. The vendor kernel shipped in the Gustard R26 contains exactly
+this sequence (matched against the binary). The accesses are byte wide on
+purpose: several hit the upper byte of a 16-bit RIU register next to
+strobe bits.
+
+Taken from the final state of the linux-chenxing mstar_v6_7_rebase branch
+(https://github.com/linux-chenxing/linux, Daniel Palmer et al.) and ported
+to v7.3. The VBUS enable result is now checked.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/phy/Kconfig                |   1 +
+ drivers/phy/Makefile               |   1 +
+ drivers/phy/mstar/Kconfig          |  34 +++
+ drivers/phy/mstar/Makefile         |   4 +
+ drivers/phy/mstar/phy-msc313-usb.c | 405 +++++++++++++++++++++++++++++
+ include/linux/usb/mstar_usbc.h     |  80 ++++++
+ include/linux/usb/mstar_utmi.h     |  80 ++++++
+ 7 files changed, 605 insertions(+)
+ create mode 100644 drivers/phy/mstar/Kconfig
+ create mode 100644 drivers/phy/mstar/Makefile
+ create mode 100644 drivers/phy/mstar/phy-msc313-usb.c
+ create mode 100644 include/linux/usb/mstar_usbc.h
+ create mode 100644 include/linux/usb/mstar_utmi.h
+
+diff --git a/drivers/phy/Kconfig b/drivers/phy/Kconfig
+index 19f3b7d12b..73f0cf565a 100644
+--- a/drivers/phy/Kconfig
++++ b/drivers/phy/Kconfig
+@@ -186,6 +186,7 @@ source "drivers/phy/mediatek/Kconfig"
+ source "drivers/phy/microchip/Kconfig"
+ source "drivers/phy/motorola/Kconfig"
+ source "drivers/phy/mscc/Kconfig"
++source "drivers/phy/mstar/Kconfig"
+ source "drivers/phy/nuvoton/Kconfig"
+ source "drivers/phy/qualcomm/Kconfig"
+ source "drivers/phy/ralink/Kconfig"
+diff --git a/drivers/phy/Makefile b/drivers/phy/Makefile
+index d7aa516bcc..aa5ee37ba9 100644
+--- a/drivers/phy/Makefile
++++ b/drivers/phy/Makefile
+@@ -38,6 +38,7 @@ obj-$(CONFIG_GENERIC_PHY)		+= allwinner/	\
+ 					   microchip/	\
+ 					   motorola/	\
+ 					   mscc/	\
++					   mstar/	\
+ 					   nuvoton/	\
+ 					   qualcomm/	\
+ 					   ralink/	\
+diff --git a/drivers/phy/mstar/Kconfig b/drivers/phy/mstar/Kconfig
+new file mode 100644
+index 0000000000..66047778e0
+--- /dev/null
++++ b/drivers/phy/mstar/Kconfig
+@@ -0,0 +1,34 @@
++# SPDX-License-Identifier: GPL-2.0-only
++#
++# Phy drivers for MStar/SigmaStar devices
++#
++
++config PHY_MSC313_USB
++	tristate "MSC313 USB PHY driver"
++	select GENERIC_PHY
++	depends on ARCH_MSTARV7 || COMPILE_TEST
++	depends on OF
++	depends on HAS_IOMEM
++	default ARCH_MSTARV7
++	help
++	  Enable this to support the USB PHY in MStar/SigmaStar SoCs
++
++config PHY_SSD20XD_DPHY
++	tristate "SSD20XD MIPI D-PHY driver"
++	select GENERIC_PHY
++	depends on ARCH_MSTARV7 || COMPILE_TEST
++	depends on OF
++	depends on HAS_IOMEM
++	default ARCH_MSTARV7
++	help
++	  Enable this to support the MIPI D-PHY in MStar/SigmaStar SoCs
++
++config PHY_SSD20XD_SATA
++	tristate "SSD20XD SATA PHY driver"
++	select GENERIC_PHY
++	depends on ARCH_MSTARV7 || COMPILE_TEST
++	depends on OF
++	depends on HAS_IOMEM
++	default ARCH_MSTARV7
++	help
++	  Enable this to support the SATA PHY in MStar/SigmaStar SoCs
+diff --git a/drivers/phy/mstar/Makefile b/drivers/phy/mstar/Makefile
+new file mode 100644
+index 0000000000..0e91b610e6
+--- /dev/null
++++ b/drivers/phy/mstar/Makefile
+@@ -0,0 +1,4 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_PHY_MSC313_USB) += phy-msc313-usb.o
++obj-$(CONFIG_PHY_SSD20XD_DPHY) += mstar_dphy.o
++obj-$(CONFIG_PHY_SSD20XD_SATA) += phy-mstar-sata.o
+diff --git a/drivers/phy/mstar/phy-msc313-usb.c b/drivers/phy/mstar/phy-msc313-usb.c
+new file mode 100644
+index 0000000000..fa8a3dfc94
+--- /dev/null
++++ b/drivers/phy/mstar/phy-msc313-usb.c
+@@ -0,0 +1,405 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include <dt-bindings/phy/phy.h>
++#include <linux/gpio/consumer.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/interrupt.h>
++#include <linux/kernel.h>
++#include <linux/iopoll.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_irq.h>
++#include <linux/phy/phy.h>
++#include <linux/platform_device.h>
++#include <linux/mfd/syscon.h>
++#include <linux/regmap.h>
++#include <linux/usb/otg.h>
++#include <linux/usb/mstar_usbc.h>
++#include <linux/usb/mstar_utmi.h>
++#include <linux/regulator/consumer.h>
++
++struct msc313_usb_phy {
++	struct device *dev;
++	struct regmap *utmi;
++	struct regmap *usbc;
++	struct regmap *bc;
++
++	enum usb_dr_mode dr_mode;
++	struct gpio_desc *id_gpiod;
++
++	bool vbus_on;
++	struct regulator *vbus;
++	/* SSD20xD: raw byte access, the vendor init touches single bytes */
++	void __iomem *utmi_base;
++	void __iomem *usbc_base;
++};
++
++static int msc313_usb_phy_init(struct phy *phy)
++{
++	struct msc313_usb_phy *msc313_usb_phy;
++
++	msc313_usb_phy = phy_get_drvdata(phy);
++	if (!msc313_usb_phy)
++		return -ENODEV;
++
++	return 0;
++}
++
++/*
++ * SSD20xD (Infinity2M) UTMI/USBC bring-up. This replays the vendor
++ * Titania3_series_start_ehc() sequence for this SoC byte for byte and in
++ * order (flags: no TESTPKG, no double data rate, no DP/DM swap), as
++ * compiled into the vendor kernel the Gustard R26 ships. All accesses are
++ * byte wide like the vendor's, several of them to the upper byte of a
++ * 16-bit RIU register, so a 16-bit read-modify-write would disturb the
++ * neighbouring byte (which holds strobes such as CA_START).
++ *
++ * The UHC (EHCI) register writes the vendor interleaves are done by the
++ * EHCI glue between phy_init() and phy_power_on() and after power_on.
++ */
++static void ssd20xd_rmwb(void __iomem *addr, u8 clr, u8 set)
++{
++	writeb((readb(addr) & ~clr) | set, addr);
++}
++
++static int ssd20xd_usb_phy_init(struct phy *phy)
++{
++	struct msc313_usb_phy *p = phy_get_drvdata(phy);
++	void __iomem *u = p->utmi_base, *c = p->usbc_base;
++	u8 cal;
++	u16 caldata;
++	int ret;
++
++	writew(0x0001, u + 0x00);
++
++	/* MIU select, and MIU lower bound address subtraction */
++	writeb(0x70, c + 0x28);
++	writeb(0xe8, c + 0x2c);
++	writeb(0xef, c + 0x2d);
++	writeb(0xef, c + 0x30);
++	ssd20xd_rmwb(c + 0x31, 0, 0x01);
++	ssd20xd_rmwb(c + 0x1d, 0, 0x01);
++
++	writew(0x0c2f, u + 0x10);
++
++	/* Hold D+/D- with the termination overwrite while the UHC is reset */
++	ssd20xd_rmwb(u + 0x00, 0, 0x80 | 0x40 | 0x02);
++	ssd20xd_rmwb(u + 0xa4, 0, 0x3f);
++
++	writeb(0x0a, c + 0x00);	/* disable MAC initial suspend, reset UHC */
++	writeb(0x28, c + 0x00);	/* release reset, enable UHC and OTG XIU */
++
++	/* Squelch level before calibration */
++	writeb(0x62 & 0x0f, u + 0x54);
++
++	/* Calibration */
++	ssd20xd_rmwb(u + 0x78, 0, 0x01);
++	mdelay(1);
++	ssd20xd_rmwb(u + 0x78, 0x01, 0);
++	ret = readb_poll_timeout(u + 0x78, cal, cal & 0x02, 10, 100000);
++	if (ret) {
++		dev_err(p->dev, "UTMI calibration timed out\n");
++		return ret;
++	}
++	caldata = readw(u + 0x78) & 0xfff0;
++	if (caldata == 0xfff0 || caldata == 0)
++		dev_warn(p->dev, "UTMI calibration failed (%04x)\n", caldata);
++
++	/* Route the port to the UHC */
++	ssd20xd_rmwb(c + 0x04, 0x02, 0x01);
++
++	return 0;
++}
++
++static int ssd20xd_usb_phy_power_on(struct phy *phy)
++{
++	struct msc313_usb_phy *p = phy_get_drvdata(phy);
++	void __iomem *u = p->utmi_base, *c = p->usbc_base;
++
++	/* UHC is out of reset and VBUS is on: drop the termination overwrite */
++	ssd20xd_rmwb(u + 0x00, 0x80 | 0x40 | 0x02, 0);
++	ssd20xd_rmwb(u + 0xa4, 0x3f, 0);
++
++	ssd20xd_rmwb(u + 0x0c, 0x20, 0x40);	/* tx_force_hs_current_enable */
++	ssd20xd_rmwb(u + 0x05, 0x10, 0x08 | 0x20);	/* disconnect window select */
++	ssd20xd_rmwb(u + 0x0d, 0x02, 0);	/* disable improved CDR */
++	ssd20xd_rmwb(u + 0x10, 0, 0x08);	/* 240 MHz phase as 120 MHz clock */
++	ssd20xd_rmwb(u + 0x11, 0, 0x01 | 0x80);	/* RX anti-deadlock, ISI */
++	ssd20xd_rmwb(u + 0x15, 0, 0x80);	/* TX timing select latch path */
++	ssd20xd_rmwb(u + 0x29, 0, 0x20);	/* chirp signal source select */
++	ssd20xd_rmwb(u + 0x29, 0, 0x40);	/* 55 interface */
++	ssd20xd_rmwb(u + 0x80, 0x10, 0);	/* HW chirp: default overwrite to reg_2A */
++	writeb(0x62, u + 0x54);			/* disconnect level */
++
++	/* Eye diagram */
++	ssd20xd_rmwb(u + 0x58, 0, 0x10);
++	ssd20xd_rmwb(u + 0x59, 0, 0x02);
++	ssd20xd_rmwb(u + 0x5c, 0, 0x00);
++	ssd20xd_rmwb(u + 0x5d, 0, 0x81);
++
++	ssd20xd_rmwb(u + 0x08, 0, 0x40);	/* LS cross point deglitch */
++	ssd20xd_rmwb(c + 0x04, 0, 0x40);	/* EOF2 resets state machine (power noise) */
++	ssd20xd_rmwb(u + 0x08, 0, 0x20);	/* HW auto deassert of TX/RX reset */
++	ssd20xd_rmwb(c + 0x21, 0, 0x02);	/* HS connection fail -> VFALL */
++	ssd20xd_rmwb(c + 0x14, 0, 0x40);	/* PV2MI bridge */
++	ssd20xd_rmwb(c + 0x15, 0x02 | 0x04 | 0x08 | 0x10, 0);	/* PV2MI burst size */
++	ssd20xd_rmwb(u + 0x7d, 0, 0x80);
++	ssd20xd_rmwb(c + 0x1d, 0, 0x08);
++	ssd20xd_rmwb(c + 0x20, 0, 0x01);
++	ssd20xd_rmwb(c + 0x20, 0, 0x02);
++	ssd20xd_rmwb(u + 0x05, 0, 0x04);
++	ssd20xd_rmwb(c + 0x25, 0, 0x01);
++	ssd20xd_rmwb(c + 0x40, 0, 0x01);
++	ssd20xd_rmwb(c + 0x40, 0, 0x02);
++	ssd20xd_rmwb(c + 0x40, 0, 0x04);
++	writeb(0x05, c + 0x05);
++
++	return 0;
++}
++
++static const struct phy_ops ssd20xd_usb_phy_ops = {
++	.init = ssd20xd_usb_phy_init,
++	.power_on = ssd20xd_usb_phy_power_on,
++	.owner = THIS_MODULE,
++};
++
++static const struct phy_ops msc313_usb_phy_ops = {
++	.init = msc313_usb_phy_init,
++	.owner = THIS_MODULE,
++};
++
++static irqreturn_t msc313_usb_phy_irq(int irq, void *data)
++{
++	struct msc313_usb_phy *phy = data;
++
++	dev_info(phy->dev, "int\n");
++	regmap_write(phy->usbc, MSTAR_USBC_REG_INTSTS, MSTAR_USBC_INT_MASK);
++
++	return IRQ_HANDLED;
++}
++
++static void msc313_usb_phy_switch_port(struct msc313_usb_phy *phy)
++{
++	enum usb_dr_mode dr_mode = phy->dr_mode;
++	struct device *dev = phy->dev;
++	int id;
++
++	regmap_update_bits(phy->usbc, MSTAR_USBC_REG_PRTCTRL,
++				MSTAR_PRTCTRL_OTG | MSTAR_PRTCTRL_UHC, 0);
++
++	if (dr_mode == USB_DR_MODE_OTG) {
++		id = phy->id_gpiod ? gpiod_get_value_cansleep(phy->id_gpiod) : 0;
++		dr_mode = id ? USB_DR_MODE_HOST : USB_DR_MODE_PERIPHERAL;
++	}
++
++	switch(dr_mode){
++	case USB_DR_MODE_HOST:
++		dev_info(phy->dev, "Switching port to UHC\n");
++		regmap_update_bits(phy->usbc, MSTAR_USBC_REG_PRTCTRL,
++					      MSTAR_PRTCTRL_UHC, MSTAR_PRTCTRL_UHC);
++
++		/* Enable vbus */
++		if (phy->vbus && !phy->vbus_on) {
++			dev_info(dev, "Enabling VBUS\n");
++			if (regulator_enable(phy->vbus))
++				dev_err(dev, "failed to enable VBUS\n");
++			else
++				phy->vbus_on = true;
++		}
++
++		break;
++	case USB_DR_MODE_PERIPHERAL:
++		if (phy->vbus && phy->vbus_on) {
++			dev_info(dev, "Disabling VBUS\n");
++			regulator_disable(phy->vbus);
++			phy->vbus_on = false;
++		}
++
++		dev_info(phy->dev, "Switching port to OTG\n");
++		regmap_update_bits(phy->usbc, MSTAR_USBC_REG_PRTCTRL,
++					      MSTAR_PRTCTRL_OTG, MSTAR_PRTCTRL_OTG);
++		break;
++	default:
++		dev_info(phy->dev, "Disconnecting port\n");
++		break;
++	}
++
++	// not sure what this is, might be MAC power down
++	//regmap_update_bits(msc313_usb_phy->usbc, MSTAR_USBC_REG_RSTCTRL,
++	//			BIT(MSTAR_RSTCTRL_VBUSVALID),
++	//			0);
++}
++
++static void msc313_usb_phy_do_calibration(struct msc313_usb_phy *phy)
++{
++	unsigned int calval;
++
++	dev_info(phy->dev, "starting calibration...\n");
++	regmap_update_bits(phy->utmi, MSTAR_UTMI_REG_CAL,
++			MSTAR_UTMI_REG_CAL_START, MSTAR_UTMI_REG_CAL_START);
++	mdelay(1);
++	regmap_update_bits(phy->utmi, MSTAR_UTMI_REG_CAL,
++			MSTAR_UTMI_REG_CAL_START, 0);
++	if(regmap_read_poll_timeout(phy->utmi, MSTAR_UTMI_REG_CAL,
++			calval, calval & MSTAR_UTMI_REG_CAL_END, 0, 1000000)){
++		dev_info(phy->dev, "calibration timeout\n");
++	}
++	else {
++		calval >>= MSTAR_UTMI_REG_CAL_DATA_SHIFT;
++		if(calval > 0 && calval < 0xfff)
++			dev_info(phy->dev, "calibration finished.\n");
++		else
++			dev_warn(phy->dev, "calibration failed.\n");
++	}
++}
++
++static int msc313_usb_phy_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct msc313_usb_phy *msc313_usb_phy;
++	struct device_node *np = dev->of_node;
++	struct phy_provider *phy_provider;
++	struct phy *phy;
++	int irq, ret;
++	bool swap;
++
++	msc313_usb_phy = devm_kzalloc(dev, sizeof(*msc313_usb_phy), GFP_KERNEL);
++	if (!msc313_usb_phy)
++		return  -ENOMEM;
++
++	msc313_usb_phy->dev = dev;
++
++	msc313_usb_phy->utmi = syscon_regmap_lookup_by_phandle(dev->of_node, "mstar,utmi");
++	if (IS_ERR(msc313_usb_phy->utmi)) {
++		return PTR_ERR(msc313_usb_phy->utmi);
++	}
++
++	msc313_usb_phy->usbc = syscon_regmap_lookup_by_phandle(dev->of_node, "mstar,usbc");
++	if (IS_ERR(msc313_usb_phy->usbc))
++		return PTR_ERR(msc313_usb_phy->usbc);
++
++	msc313_usb_phy->bc = syscon_regmap_lookup_by_phandle(dev->of_node, "mstar,bc");
++	if (IS_ERR(msc313_usb_phy->bc)) {
++		msc313_usb_phy->bc = NULL;
++	}
++
++	msc313_usb_phy->dr_mode = usb_get_dr_mode(dev);
++	/* for now start with host mode if we couldn't work out what is wanted */
++	if (msc313_usb_phy->dr_mode == USB_DR_MODE_UNKNOWN)
++		msc313_usb_phy->dr_mode = USB_DR_MODE_HOST;
++
++	irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
++	if (!irq) {
++		dev_warn(&pdev->dev, "no interrupt provided");
++	}
++
++	if (msc313_usb_phy->dr_mode == USB_DR_MODE_OTG) {
++		msc313_usb_phy->id_gpiod = devm_gpiod_get_optional(&pdev->dev, "id", GPIOD_IN);
++	}
++
++	msc313_usb_phy->vbus = devm_regulator_get(dev, "vbus");
++
++	if (of_device_is_compatible(np, "sstar,ssd20xd-usb-phy")) {
++		struct device_node *n;
++
++		n = of_parse_phandle(np, "mstar,utmi", 0);
++		msc313_usb_phy->utmi_base = n ? of_iomap(n, 0) : NULL;
++		of_node_put(n);
++		n = of_parse_phandle(np, "mstar,usbc", 0);
++		msc313_usb_phy->usbc_base = n ? of_iomap(n, 0) : NULL;
++		of_node_put(n);
++		if (!msc313_usb_phy->utmi_base || !msc313_usb_phy->usbc_base)
++			return -ENOMEM;
++
++		/* Everything else happens in phy_init()/phy_power_on() */
++		phy = devm_phy_create(dev, NULL, &ssd20xd_usb_phy_ops);
++		goto register_phy;
++	}
++
++	// hack for m5, these seem to be the reset values for i3
++	regmap_write(msc313_usb_phy->usbc, MSTAR_USBC_REG_RSTCTRL,
++			0x228);
++	regmap_write(msc313_usb_phy->utmi, MSTAR_UTMI_REG_PLL_TEST1,
++				0x2088);
++	regmap_write(msc313_usb_phy->utmi, MSTAR_UTMI_REG_PLL_TEST0,
++				0x8051);
++	regmap_write(msc313_usb_phy->utmi, MSTAR_UTMI_REG_CONFIG,
++			0x2084);
++
++	//FIXME for some reason this doesn't update the registers.
++	// some voodoo that is enabled for the msc313 in the vendor sdk
++	regmap_write(msc313_usb_phy->usbc, MSTAR_USBC_REG_MIUCFG0,
++					0x0);
++	regmap_write(msc313_usb_phy->usbc, MSTAR_USBC_REG_MIUCFG1,
++					0xffff);
++	regmap_write(msc313_usb_phy->usbc, MSTAR_USBC_REG_MIUCFG2,
++					BIT(8) | 0xff);
++
++	// clear any existing interrupts and then enable
++	// the interrupt
++	regmap_write(msc313_usb_phy->usbc, MSTAR_USBC_REG_INTEN,
++		     MSTAR_USBC_INT_MASK);
++	regmap_write(msc313_usb_phy->usbc, MSTAR_USBC_REG_INTSTS,
++		     MSTAR_USBC_INT_MASK);
++	if (irq) {
++		ret = devm_request_irq(&pdev->dev, irq, msc313_usb_phy_irq, IRQF_SHARED,
++				dev_name(&pdev->dev), msc313_usb_phy);
++
++		if (ret)
++			return ret;
++	}
++
++	// power up hacks
++	regmap_write(msc313_usb_phy->utmi, REG_CLKCTRL, 0x0c2f);
++	regmap_write(msc313_usb_phy->utmi, REG_CLKCTRL, 0x040f);
++	regmap_write(msc313_usb_phy->utmi, REG_PWRCTRL, 0x7f05);
++
++	msc313_usb_phy_switch_port(msc313_usb_phy);
++
++	regmap_write(msc313_usb_phy->utmi, REG_CLKCTRL, 0x0426);
++	regmap_write(msc313_usb_phy->utmi, REG_PWRCTRL, 0x6bc3);
++	regmap_write(msc313_usb_phy->utmi, REG_PWRCTRL, 0x69c3);
++	regmap_write(msc313_usb_phy->utmi, REG_PWRCTRL, 0x0001);
++
++	regmap_write(msc313_usb_phy->utmi, REG_EYESETTING1, 0x0210);
++	regmap_write(msc313_usb_phy->utmi, REG_EYESETTING2, 0x8100);
++
++	msc313_usb_phy_do_calibration(msc313_usb_phy);
++
++	swap = of_property_read_bool(dev->of_node, "mstar,utmi-dxswap");
++
++	if(swap)
++		dev_info(dev, "enabling data line swap");
++	regmap_update_bits(msc313_usb_phy->utmi, MSTAR_UTMI_REG_CLKINV,
++			MSTAR_UTMI_REG_CLKINV_DPDNSWP, swap ? MSTAR_UTMI_REG_CLKINV_DPDNSWP : 0);
++
++	//regmap_update_bits(msc313_usb_phy->regmap, REG_PWRCTRL, PWRCTRL_UPLL_PDN, 0);
++
++	phy = devm_phy_create(dev, NULL, &msc313_usb_phy_ops);
++register_phy:
++	if (IS_ERR(phy))
++		return PTR_ERR(phy);
++	phy_set_drvdata(phy, msc313_usb_phy);
++
++	dev_set_drvdata(dev, msc313_usb_phy);
++
++	phy_provider = devm_of_phy_provider_register(&pdev->dev,
++						     of_phy_simple_xlate);
++	return PTR_ERR_OR_ZERO(phy_provider);
++}
++
++static const struct of_device_id msc313_usb_phy_ids[] = {
++	{ .compatible = "sstar,ssd20xd-usb-phy", },
++	{ .compatible = "mstar,msc313-usb-phy", },
++	{ /* end of list */ },
++};
++
++static struct platform_driver msc313_usb_phy_driver = {
++	.probe	= msc313_usb_phy_probe,
++	.driver = {
++		.of_match_table	= msc313_usb_phy_ids,
++		.name  = "msc313-usb-phy",
++	}
++};
++builtin_platform_driver(msc313_usb_phy_driver);
+diff --git a/include/linux/usb/mstar_usbc.h b/include/linux/usb/mstar_usbc.h
+new file mode 100644
+index 0000000000..b38a097e96
+--- /dev/null
++++ b/include/linux/usb/mstar_usbc.h
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* USBC
++ *
++ * otg - musb controller
++ * uhc - ehci host controller
++ *
++ * 0x00 - reset control
++ * reset value	msc313	0x228
++ * 		ssc8336	0x200
++ *                    	                     |    9    |     8
++ *                                           |vbusvalid| vbus_sel
++ *    6    |    5    |      3      |    2    |    1    |    0
++ * otg xiu | uhc xiu | reg suspend | otg_rst | uhc_rst | usb_rst
++ *
++ * 0x04 - port control
++ *       4       |          3         |      1       |       0
++ * idpullup_ctrl | interrupt polarity | portctrl_otg | portctrl_uhc
++ *
++ * 0x08 - interrupt enable
++ *    3     |  2   |  1   |  0
++ *   id     | bval | aval | vbus
++ *
++ * 0x0c - interrupt status
++ * - order same as above
++ *
++ * 0x10 - utmi signal
++ * 15 - 13 |    12    |    11   |    10    |    9    |    8
++ *         | rxactive | rxvalid | rxvalidh | rxerror | txready
++ *  7 - 6  |          |         |          |         |    0
++ *  dm/dp  |          |         | bvalid   | avalid  | vbusvalid
++ *
++ * 0x14 - power enable
++ * 0x18 - power status
++ *
++ * MIU select?
++ * 0x28 - miu sel 0 - set to 0x00 by the vendor code
++ * 0x2c - miu sel 1 - set to 0xff by the vendor code
++ * 0x2d - miu sel 2 - set to 0xff by the vendor code
++ * 0x30 - miu sel 3 - set to 0xff by the vendor code
++ * 0x31
++ *        0
++ *  miu partition   - set to 1 by the vendor code
++ *  
++ * 0x101 - vendor sdk says setting bits 0,1,2,3 and 7 here "improve the efficiency of usb access miu when system is busy"
++ */
++
++#define MSTAR_USBC_REG_RSTCTRL	0x00
++
++static const struct reg_field usbc_vbus_sel_field = REG_FIELD(MSTAR_USBC_REG_RSTCTRL, 8, 8);
++static const struct reg_field usbc_reg_vbusvalid_field = REG_FIELD(MSTAR_USBC_REG_RSTCTRL, 9, 9);
++
++#define MSTAR_USBC_REG_PRTCTRL	0x04
++#define MSTAR_USBC_REG_INTEN	0x08
++#define MSTAR_USBC_REG_INTSTS	0x0c
++
++#define MSTAR_USBC_REG_MIUCFG0	0x28 // miu sel 0
++#define MSTAR_USBC_REG_MIUCFG1	0x2c // miu sel 1 + 2
++#define MSTAR_USBC_REG_MIUCFG2	0x30 // miu sel 3 + miu partition
++
++// 0x10 on i2m
++#define MSTAR_USBC_CONFIG		0x40
++#define MSTAR_USBC_CONFIG_RSTSPDDIS	BIT(0)
++
++#define MSTAR_RSTCTRL_USB_RST		(1 << 0)
++#define MSTAR_RSTCTRL_UHC_RST		(1 << 1)
++#define MSTAR_RSTCTRL_OTG_RST		(1 << 2)
++#define MSTAR_RSTCTRL_REG_SUSPEND	(1 << 3)
++#define MSTAR_RSTCTRL_UHC_XIU		(1 << 5)
++#define MSTAR_RSTCTRL_OTG_XIU		(1 << 6)
++
++#define MSTAR_RSTCTRL_VBUSVALID		9
++
++#define MSTAR_PRTCTRL_UHC			(1 << 0)
++#define MSTAR_PRTCTRL_OTG			(1 << 1)
++
++#define MSTAR_USBC_INT_VBUS	0
++#define MSTAR_USBC_INT_AVAL	1
++#define MSTAR_USBC_INT_BVAL	2
++#define MSTAR_USBC_INT_ID	3
++#define MSTAR_USBC_INT_MASK	(BIT(MSTAR_USBC_INT_VBUS)|BIT(MSTAR_USBC_INT_AVAL)|BIT(MSTAR_USBC_INT_BVAL)|BIT(MSTAR_USBC_INT_ID))
+diff --git a/include/linux/usb/mstar_utmi.h b/include/linux/usb/mstar_utmi.h
+new file mode 100644
+index 0000000000..61c6c59550
+--- /dev/null
++++ b/include/linux/usb/mstar_utmi.h
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++/*
++ * utmi registers
++ *
++ * 0x0 - pwrctrl
++ * reset value	msc313  - 0x7f03
++ * 		ssc8336 - 0xff05
++ *
++ *     15      |    14     |      13     |      12     |       11      |      10        |         9          |         8
++ *     pdn     | iref_pdn  | vbusdet_pdn | fl_xcvr_pdn | hs_preamp_pdn |  hs_ted_pdn    |     upll_pdn       |     hs_dm_pdn
++ *       7     |     6     |      5      |      4      |        3      |       2        |         1          |         0
++ *  r_dm_pden  | r_dp_pden |  r_pumode   |   dm_puen   |     dp_puen   | ref power down | term override mode | pdn override mode
++ *
++ *
++ * 0x4 - config
++ * reset value  msc313  - 0x2084
++ * 		ssc8336 - 0x9080
++ *
++ * magic value	ssc8336 - 0x2084 - from dashcam app
++ *
++ *                3                     |               2                |     1    |    0
++ * override value to control NRZI mode  |             clk12_sel          | fsls_sel | sel_ovr
++ *                                      |		0 - 12mhz        |          |
++ *                                      | 1 - "from digital synthesizer" |          |
++ *
++ * 0x10 - clkctrl
++ * |       15      |     14     | 13 |       12      |      11      |        10        |        9         |    8
++ * |               |            |    | clk214_syn_en | force_pll_on | clk_ctl_override |   xtal12_en      | all_pass
++ * |      7        |     6      | 5  |       4       |       3      |        2         |        1         |     0
++ * | pd_bg_current | clktest_en |    |               |       ?      |        ?         |  utmi_clk120_en  | utmi_clk_en
++ *
++ *
++ * 0x14 - clkinv
++ *
++ *      13    |
++ * dp/dn swap |
++ *
++ *
++ * 0x40 - PLL_TEST[15:0]
++ * 0x44 - PLL_TEST[31:16]
++ * 0x48 - PLL_TEST[39:32]
++ *
++ * From SSC8336
++ * 0x2088 0x8051
++ *
++ * 0x58 - utmi eye setting 2c
++ * 0x59 - utmi eye setting 2d
++ * 0x5c - utmi eye setting 2e
++ * 0x5d - utmi eye setting 2f
++ *
++ * 0x60 -
++ *
++ * 0x78 - calibration
++ *          15 - 4          | 3 |     2      |    1    |    0
++ *  calibration detail data |   | power good | ca_end  | ca_start
++ *
++ * 0x1c
++ *
++ */
++
++#define REG_PWRCTRL			0x0
++#define MSTAR_UTMI_REG_CONFIG		0x4
++#define REG_CLKCTRL			0x10
++#define MSTAR_UTMI_REG_CLKINV		0x14
++#define MSTAR_UTMI_REG_CLKINV_DPDNSWP	BIT(13)
++#define PWRCTRL_REG_PDN			15
++#define PWRCTRL_UPLL_PDN		9
++#define PWRCTRL_VREF_PDN		2
++#define MSTAR_UTMI_REG_PLL_TEST0	0x40
++#define MSTAR_UTMI_REG_PLL_TEST1	0x44
++#define MSTAR_UTMI_REG_PLL_TEST2	0x48
++#define REG_EYESETTING1			0x58
++#define REG_EYESETTING2			0x5c
++#define MSTAR_UTMI_REG_CAL		0x78
++#define MSTAR_UTMI_REG_CAL_START	BIT(0)
++#define MSTAR_UTMI_REG_CAL_END		BIT(1)
++#define MSTAR_UTMI_REG_CAL_DATA_SHIFT	4
++
++static struct reg_field mstar_utmi_pwrctrl_pwrdwn_field = REG_FIELD(REG_PWRCTRL, PWRCTRL_REG_PDN, PWRCTRL_REG_PDN);
+-- 
+2.56.0
+

@@ -1,0 +1,130 @@
+From a7ce7c4acfea3e58fb5d2bd2b14521ec9ed2950b Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 13:26:55 +0900
+Subject: [PATCH 13/14] ARM: dts: sigmastar: add the Gustard R26 streamer
+
+SSD202D board in the Gustard R26 DAC: EMAC with the internal PHY, the
+DAC's XMOS USB Audio 2.0 on the third USB port, the internal microSD on
+the SD host, uart0 as plain ns16550a, and the stock kernel's CMA range
+kept reserved.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm/boot/dts/sigmastar/Makefile          |  1 +
+ .../mstar-infinity2m-ssd202d-gustard-r26.dts  | 92 +++++++++++++++++++
+ 2 files changed, 93 insertions(+)
+ create mode 100644 arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+
+diff --git a/arch/arm/boot/dts/sigmastar/Makefile b/arch/arm/boot/dts/sigmastar/Makefile
+index b07eaf5d8a..4e1032017d 100644
+--- a/arch/arm/boot/dts/sigmastar/Makefile
++++ b/arch/arm/boot/dts/sigmastar/Makefile
+@@ -4,6 +4,7 @@ dtb-$(CONFIG_ARCH_MSTARV7) += \
+ 	mstar-infinity2m-ssd202d-100ask-dongshanpione.dtb \
+ 	mstar-infinity2m-ssd202d-miyoo-mini.dtb \
+ 	mstar-infinity2m-ssd202d-wirelesstag-ido-sbc2d06-v1b-22w.dtb \
++	mstar-infinity2m-ssd202d-gustard-r26.dtb \
+ 	mstar-infinity2m-ssd202d-ssd201htv2.dtb \
+ 	mstar-infinity2m-ssd202d-unitv2.dtb \
+ 	mstar-infinity3-msc313e-breadbee.dtb \
+diff --git a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+new file mode 100644
+index 0000000000..0ca190d948
+--- /dev/null
++++ b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+@@ -0,0 +1,92 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Gustard R26 DAC, network streamer board (SigmaStar SSD202D).
++ *
++ * The streamer boots its rootfs from an internal microSD and talks to
++ * the DAC over USB (XMOS USB Audio 2.0 on the third EHCI port).
++ * Values here were checked against the stock vendor DT and the
++ * running stock system.
++ */
++
++/dts-v1/;
++#include "mstar-infinity2m-ssd202d.dtsi"
++
++/ {
++	model = "Gustard R26 streamer";
++	compatible = "gustard,r26", "mstar,infinity2m";
++
++	aliases {
++		serial0 = &pm_uart;
++		mmc0 = &sdio;
++	};
++
++	chosen {
++		stdout-path = "serial0:115200n8";
++	};
++
++	reserved-memory {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++
++		/*
++		 * The stock kernel's CMA area, used for its EMAC and USB DMA
++		 * buffers. Keep it unused so a kernel started straight from a
++		 * running stock system can't be hit by leftover DMA.
++		 */
++		stock_cma: stock-cma@27e00000 {
++			reg = <0x27e00000 0x200000>;
++			no-map;
++		};
++	};
++};
++
++/*
++ * uart0: use the plain 16550 binding as mainline's own dtsi does (the
++ * msc313-uart 8250_dw quirk only matters with UART DMA). The pads are left
++ * as the bootloader set them: where they go on the R26 board is unknown.
++ */
++&pm_uart {
++	compatible = "ns16550a";
++	clock-frequency = <172000000>;
++	/delete-property/ clocks;
++	/delete-property/ pinctrl-names;
++	/delete-property/ pinctrl-0;
++	status = "okay";
++};
++
++/* eth0: EMAC with the SoC's integrated 10/100 PHY */
++&emac {
++	status = "okay";
++};
++
++/* Third USB port: the DAC's XMOS USB Audio 2.0 interface (20b1:3033) */
++&usbphy2 {
++	compatible = "sstar,ssd20xd-usb-phy", "mstar,msc313-usb-phy";
++	status = "okay";
++};
++
++&uhc2 {
++	compatible = "sstar,ssd20xd-ehci", "mstar,msc313-ehci";
++	status = "okay";
++};
++
++/*
++ * The streamer boots from an internal microSD in a hinged socket, so the
++ * card is treated as non-removable. Besides its own register bank the
++ * controller needs the SDIO clock mux (CLKGEN), the FCIE clock source
++ * select (SC_GP_CTRL) and the SD pad mux/drive/pull bits (CHIPTOP).
++ */
++&sdio {
++	compatible = "sstar,ssd20xd-sdio";
++	reg = <0x282000 0x200>,
++	      <0x207114 0x4>,
++	      <0x226694 0x4>,
++	      <0x203c20 0x4>,
++	      <0x203cc8 0x4>;
++	reg-names = "sdio", "clkgen", "scgp", "padmux", "padcfg";
++	/delete-property/ cd-gpios;
++	non-removable;
++	max-frequency = <48000000>;
++	status = "okay";
++};
+-- 
+2.56.0
+

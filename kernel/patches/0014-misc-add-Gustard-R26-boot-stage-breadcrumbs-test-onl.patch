@@ -1,0 +1,76 @@
+From be591af6005aebb8315800ac6c11d8af4a25971b Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 13:26:55 +0900
+Subject: [PATCH 14/14] misc: add Gustard R26 boot-stage breadcrumbs (test
+ only)
+
+Bring-up aid, not for upstream: writes boot stage markers into the
+watchdog bank dummy register.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/misc/Kconfig      |  4 ++++
+ drivers/misc/Makefile     |  1 +
+ drivers/misc/r26-marker.c | 29 +++++++++++++++++++++++++++++
+ 3 files changed, 34 insertions(+)
+ create mode 100644 drivers/misc/r26-marker.c
+
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index 7364931dad..51aac5ae0d 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -587,3 +587,7 @@ source "drivers/misc/amd-sbi/Kconfig"
+ source "drivers/misc/rp1/Kconfig"
+ source "drivers/misc/issei/Kconfig"
+ endmenu
++
++config R26_MARKER
++	bool "Gustard R26 boot-stage breadcrumbs (test only)"
++	depends on ARCH_MSTARV7
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index e8d8d5d88c..0af6f96c7e 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -71,3 +71,4 @@ obj-y				+= keba/
+ obj-y				+= amd-sbi/
+ obj-$(CONFIG_MISC_RP1)		+= rp1/
+ obj-$(CONFIG_INTEL_SSEI)	+= issei/
++obj-$(CONFIG_R26_MARKER)		+= r26-marker.o
+diff --git a/drivers/misc/r26-marker.c b/drivers/misc/r26-marker.c
+new file mode 100644
+index 0000000000..5da611291a
+--- /dev/null
++++ b/drivers/misc/r26-marker.c
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * TEST ONLY (Gustard R26 bring-up): write boot-stage breadcrumbs into the
++ * watchdog bank's dummy register (WDT_DUMMY_REG_1, 0x1F006004), which the
++ * test loader reads back from the stock system after the watchdog reset.
++ */
++#include <linux/init.h>
++#include <linux/io.h>
++
++#define R26_MARKER_PHYS	0x1f006004
++
++static void r26_mark(u16 v)
++{
++	void __iomem *p = ioremap(R26_MARKER_PHYS, 2);
++
++	if (p) {
++		writew(v, p);
++		iounmap(p);
++	}
++}
++
++static int __init r26_mark_early(void)  { r26_mark(0x5204); return 0; }
++static int __init r26_mark_core(void)   { r26_mark(0x5205); return 0; }
++static int __init r26_mark_device(void) { r26_mark(0x5206); return 0; }
++static int __init r26_mark_late(void)   { r26_mark(0x5207); return 0; }
++early_initcall(r26_mark_early);
++core_initcall(r26_mark_core);
++device_initcall(r26_mark_device);
++late_initcall_sync(r26_mark_late);
+-- 
+2.56.0
+

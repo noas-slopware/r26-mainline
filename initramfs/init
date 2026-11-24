@@ -1,0 +1,87 @@
+#!/bin/busybox sh
+# R26 test initramfs. Never mounts the SD card on its own.
+# Every step is logged to /dev/kmsg, so netconsole carries it to Gorakubu.
+
+/bin/busybox --install -s /bin
+export PATH=/bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /tmp /run
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+
+log() { echo "r26-init: $*" > /dev/kmsg; }
+devmem 0x1f006004 16 0x5208 2>/dev/null
+
+log "userspace up, $(cut -d' ' -f1 /proc/uptime)s"
+log "cmdline: $(cat /proc/cmdline)"
+
+# Rootfs mode: hand over to the Debian rootfs on the card
+if grep -q r26root /proc/cmdline; then
+	log "r26root: waiting for mmcblk0p1"
+	i=0
+	while [ ! -b /dev/mmcblk0p1 ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+	mkdir -p /newroot
+	if mount -t ext4 -o rw /dev/mmcblk0p1 /newroot; then
+		log "r26root: mounted rw, switching to /sbin/init"
+		umount /sys/kernel/debug 2>/dev/null
+		umount /dev/pts /tmp /run 2>/dev/null
+		umount /sys /proc
+		umount /dev
+		devmem 0x1f006004 16 0x5209 2>/dev/null
+		exec switch_root /newroot /sbin/init
+	fi
+	log "r26root: mount failed, staying in initramfs"
+fi
+
+ip link set lo up
+log "eth0: $(ip -o -4 addr show eth0 2>&1 | head -1)"
+log "link: $(cat /sys/class/net/eth0/carrier 2>&1) $(cat /sys/class/net/eth0/address 2>&1)"
+
+mkdir -p /etc/dropbear /root/.ssh
+chmod 700 /root/.ssh
+log "starting dropbear"
+/sbin/dropbear -E -s -p 22 2>/tmp/dropbear.log &
+
+# Fallback log path: dynamic netconsole + one full dmesg push to Gorakubu
+mkdir -p /sys/kernel/config
+mount -t configfs configfs /sys/kernel/config 2>/dev/null
+if [ -d /sys/kernel/config/netconsole ]; then
+	t=/sys/kernel/config/netconsole/r26
+	mkdir -p $t
+	echo eth0 > $t/dev_name
+	echo 192.0.2.54 > $t/remote_ip
+	echo 6667 > $t/remote_port
+	echo 1 > $t/enabled 2>/dev/null
+fi
+dmesg | nc -u -w 2 192.0.2.54 6668 2>/dev/null
+
+for f in /proc/asound/cards /sys/kernel/debug/usb/devices; do
+	[ -r "$f" ] && log "$f: $(tr '\n' '|' < "$f")"
+done
+log "ready, $(cut -d' ' -f1 /proc/uptime)s"
+
+# Keep PID 1 alive; the hardware watchdog ends the session.
+# r26cycle: test an interface down/up the way Debian's udev/networkd would
+if grep -q r26cycle /proc/cmdline; then
+	(
+		sleep 15
+		echo "cycle: down at $(cut -d' ' -f1 /proc/uptime)" | nc -u -w 1 192.0.2.54 6670
+		ip link set eth0 down
+		sleep 2
+		ip link set eth0 up
+		sleep 6
+		echo "cycle: up at $(cut -d' ' -f1 /proc/uptime) carrier=$(cat /sys/class/net/eth0/carrier) $(ip -o -4 addr show eth0) | $(dmesg | tail -8 | tr '\n' '|')" | nc -u -w 1 192.0.2.54 6670
+	) &
+fi
+
+n=0
+while :; do
+	echo "hb $n up $(cut -d' ' -f1 /proc/uptime) irq: $(grep -E 'ehci|eth0' /proc/interrupts | tr -s ' ' | tr '\n' '|') $(dmesg | tail -2 | tr '\n' '|') DB: $(for d in /proc/[0-9]*; do c=$(cat $d/comm 2>/dev/null); [ "$c" = dropbear ] && echo "${d#/proc/} $(cut -d' ' -f3 $d/stat) $(cat $d/wchan)"; done | tr '\n' ';') LOG: $(tail -3 /tmp/dropbear.log | tr '\n' '|')" | nc -u -w 1 192.0.2.54 6669
+	n=$((n+1))
+	sleep 2
+done

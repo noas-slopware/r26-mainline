@@ -1,0 +1,53 @@
+From 1d74901fd4aee653b8a826cbdb0266fa3eedec39 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 13:26:54 +0900
+Subject: [PATCH 01/14] mfd: syscon: add use-raw-spinlock property
+
+Allow a syscon to ask for a raw spinlock regmap via the use-raw-spinlock
+DT property, needed by MStar PM sleep register users in atomic context.
+
+Taken from the final state of the linux-chenxing mstar_v6_7_rebase branch
+(https://github.com/linux-chenxing/linux, Daniel Palmer et al.) and ported
+to v7.3.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/mfd/syscon.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/mfd/syscon.c b/drivers/mfd/syscon.c
+index 21a7fcdd27..7f1972ec41 100644
+--- a/drivers/mfd/syscon.c
++++ b/drivers/mfd/syscon.c
+@@ -42,7 +42,7 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_res)
+ 	struct clk *clk;
+ 	struct regmap *regmap;
+ 	void __iomem *base;
+-	u32 reg_io_width;
++	u32 reg_io_width, val_bits;
+ 	int ret;
+ 	struct regmap_config syscon_config = syscon_regmap_config;
+ 	struct resource res;
+@@ -79,6 +79,11 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_res)
+ 	if (ret)
+ 		reg_io_width = 4;
+ 
++	/* Sometimes we have only a certain number of bits */
++	ret = of_property_read_u32(np, "val-bits", &val_bits);
++	if (ret)
++		val_bits = reg_io_width * 8;
++
+ 	ret = of_hwspin_lock_get_id(np, 0);
+ 	if (ret > 0 || (IS_ENABLED(CONFIG_HWSPINLOCK) && ret == 0)) {
+ 		syscon_config.use_hwlock = true;
+@@ -113,6 +118,7 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_res)
+ 	syscon_config.max_register = res_size - reg_io_width;
+ 	if (!syscon_config.max_register)
+ 		syscon_config.max_register_is_0 = true;
++	syscon_config.use_raw_spinlock = of_property_read_bool(np, "use-raw-spinlock");
+ 
+ 	regmap = regmap_init_mmio(NULL, base, &syscon_config);
+ 	kfree(syscon_config.name);
+-- 
+2.56.0
+
