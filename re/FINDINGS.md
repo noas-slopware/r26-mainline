@@ -1,5 +1,7 @@
 # R26 kernel RE findings
 
+A lab log, oldest first: each section says what was known when it was written, so early "still to check" and "not built yet" items were settled further down. The current state is in `STATUS.md` at the top of the repository.
+
 Shipped: `stock/GustardCore.Image` (4.9.84 #30, 2022-12-02), base 0xc0008000. It is a **Thumb-2 kernel** (`CONFIG_THUMB2_KERNEL=y`, `-Os`); the head is `add r9, pc, #1; bx r9`.
 
 ## Closest vendor source
