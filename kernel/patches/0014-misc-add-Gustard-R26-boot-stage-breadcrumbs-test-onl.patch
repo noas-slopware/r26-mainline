@@ -1,7 +1,7 @@
 From be591af6005aebb8315800ac6c11d8af4a25971b Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:55 +0900
-Subject: [PATCH 14/14] misc: add Gustard R26 boot-stage breadcrumbs (test
+Subject: [PATCH 14/18] misc: add Gustard R26 boot-stage breadcrumbs (test
  only)
 
 Bring-up aid, not for upstream: writes boot stage markers into the

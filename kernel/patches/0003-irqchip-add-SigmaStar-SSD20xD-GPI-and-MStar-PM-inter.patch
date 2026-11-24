@@ -1,7 +1,7 @@
 From 75f1ca26a55caaf6f0f185c0bcfd2463c98fe9b7 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:54 +0900
-Subject: [PATCH 03/14] irqchip: add SigmaStar SSD20xD GPI and MStar PM
+Subject: [PATCH 03/18] irqchip: add SigmaStar SSD20xD GPI and MStar PM
  interrupt controllers
 
 Add the SSD20xD GPIO interrupt controller (gpi), the MStar PM sleep

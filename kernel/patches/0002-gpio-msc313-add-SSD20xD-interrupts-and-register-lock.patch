@@ -1,7 +1,7 @@
 From ff0f8a7ceee735e505bb77d2fb65590f613b5739 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:54 +0900
-Subject: [PATCH 02/14] gpio: msc313: add SSD20xD interrupts and register
+Subject: [PATCH 02/18] gpio: msc313: add SSD20xD interrupts and register
  locking
 
 Add interrupt support for SSD20xD and serialise the read-modify-write

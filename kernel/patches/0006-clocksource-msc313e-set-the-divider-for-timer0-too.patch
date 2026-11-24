@@ -1,7 +1,7 @@
 From c5ada6b79633b977c9c91abf490c3a53664d4ac2 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:54 +0900
-Subject: [PATCH 06/14] clocksource: msc313e: set the divider for timer0 too
+Subject: [PATCH 06/18] clocksource: msc313e: set the divider for timer0 too
 
 Taken from the final state of the linux-chenxing mstar_v6_7_rebase branch
 (https://github.com/linux-chenxing/linux, Daniel Palmer et al.) and ported

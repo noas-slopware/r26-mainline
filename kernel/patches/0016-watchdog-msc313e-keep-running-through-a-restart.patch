@@ -1,0 +1,78 @@
+From ebaf75f6eada96f32bc908b75020363c2a840bf9 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 15:14:41 +0900
+Subject: [PATCH 16/18] watchdog: msc313e: keep running through a restart
+
+watchdog_stop_on_reboot() stops the watchdog before device_shutdown(),
+so a driver that hangs while shutting down leaves the system stuck with
+no watchdog. On a restart the system is about to reset anyway, so keep
+the watchdog running and stop it only for halt and power off.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/watchdog/msc313e_wdt.c | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/watchdog/msc313e_wdt.c b/drivers/watchdog/msc313e_wdt.c
+index d62586f6e0..cab13f5dca 100644
+--- a/drivers/watchdog/msc313e_wdt.c
++++ b/drivers/watchdog/msc313e_wdt.c
+@@ -11,6 +11,7 @@
+ #include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
++#include <linux/reboot.h>
+ #include <linux/watchdog.h>
+ 
+ #define REG_WDT_CLR			0x0
+@@ -29,6 +30,7 @@ struct msc313e_wdt_priv {
+ 	void __iomem *base;
+ 	struct watchdog_device wdev;
+ 	struct clk *clk;
++	struct notifier_block reboot_nb;
+ };
+ 
+ static u32 msc313e_wdt_get_hw_timeout(struct msc313e_wdt_priv *priv)
+@@ -100,6 +102,20 @@ static int msc313e_wdt_settimeout(struct watchdog_device *wdev, unsigned int new
+ 	return 0;
+ }
+ 
++/*
++ * Keep the watchdog running through a restart, so a hang anywhere in the
++ * shutdown path still ends in a reset; stop it only for halt and power off.
++ */
++static int msc313e_wdt_reboot(struct notifier_block *nb, unsigned long code, void *data)
++{
++	struct msc313e_wdt_priv *priv = container_of(nb, struct msc313e_wdt_priv, reboot_nb);
++
++	if (code != SYS_RESTART &&
++	    (watchdog_active(&priv->wdev) || watchdog_hw_running(&priv->wdev)))
++		msc313e_wdt_stop(&priv->wdev);
++	return NOTIFY_DONE;
++}
++
+ static const struct watchdog_info msc313e_wdt_ident = {
+ 	.identity = "MSC313e watchdog",
+ 	.options = WDIOF_MAGICCLOSE | WDIOF_KEEPALIVEPING | WDIOF_SETTIMEOUT,
+@@ -154,7 +170,6 @@ static int msc313e_wdt_probe(struct platform_device *pdev)
+ 	platform_set_drvdata(pdev, priv);
+ 
+ 	watchdog_init_timeout(&priv->wdev, timeout, dev);
+-	watchdog_stop_on_reboot(&priv->wdev);
+ 	watchdog_stop_on_unregister(&priv->wdev);
+ 	watchdog_stop_ping_on_suspend(&priv->wdev);
+ 
+@@ -176,6 +191,10 @@ static int msc313e_wdt_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	ret = devm_watchdog_register_device(dev, &priv->wdev);
++	if (!ret) {
++		priv->reboot_nb.notifier_call = msc313e_wdt_reboot;
++		ret = devm_register_reboot_notifier(dev, &priv->reboot_nb);
++	}
+ 
+ 	/* If the WDT is running and anything goes wrong, disable the clock. */
+ 	if (ret && test_bit(WDOG_HW_RUNNING, &priv->wdev.status))
+-- 
+2.56.0
+
