@@ -1,7 +1,7 @@
 From ebaf75f6eada96f32bc908b75020363c2a840bf9 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 15:14:41 +0900
-Subject: [PATCH 16/18] watchdog: msc313e: keep running through a restart
+Subject: [PATCH 16/26] watchdog: msc313e: keep running through a restart
 
 watchdog_stop_on_reboot() stops the watchdog before device_shutdown(),
 so a driver that hangs while shutting down leaves the system stuck with
@@ -73,6 +73,3 @@ index d62586f6e0..cab13f5dca 100644
  
  	/* If the WDT is running and anything goes wrong, disable the clock. */
  	if (ret && test_bit(WDOG_HW_RUNNING, &priv->wdev.status))
--- 
-2.56.0
-

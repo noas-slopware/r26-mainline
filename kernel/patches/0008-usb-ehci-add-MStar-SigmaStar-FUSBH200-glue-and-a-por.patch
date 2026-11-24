@@ -1,7 +1,7 @@
 From 91bdf03450d1fac2d941dce52fa4fe7ea980114c Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:55 +0900
-Subject: [PATCH 08/18] usb: ehci: add MStar/SigmaStar FUSBH200 glue and a port
+Subject: [PATCH 08/26] usb: ehci: add MStar/SigmaStar FUSBH200 glue and a port
  reset hook
 
 Add the MStar flavour of the Faraday FUSBH200 EHCI (ehci-fotg210.c from
@@ -1066,6 +1066,3 @@ index d7a3c8d13f..6f003e3da4 100644
 +		return EHCI_ITD_LENGTH(t);
 +}
  #endif /* __LINUX_EHCI_HCD_H */
--- 
-2.56.0
-

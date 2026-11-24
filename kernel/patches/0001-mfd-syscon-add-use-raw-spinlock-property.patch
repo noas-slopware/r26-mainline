@@ -1,7 +1,7 @@
 From 1d74901fd4aee653b8a826cbdb0266fa3eedec39 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:54 +0900
-Subject: [PATCH 01/18] mfd: syscon: add use-raw-spinlock property
+Subject: [PATCH 01/26] mfd: syscon: add use-raw-spinlock property
 
 Allow a syscon to ask for a raw spinlock regmap via the use-raw-spinlock
 DT property, needed by MStar PM sleep register users in atomic context.
@@ -48,6 +48,3 @@ index 21a7fcdd27..7f1972ec41 100644
  
  	regmap = regmap_init_mmio(NULL, base, &syscon_config);
  	kfree(syscon_config.name);
--- 
-2.56.0
-

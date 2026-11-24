@@ -1,7 +1,7 @@
 From be591af6005aebb8315800ac6c11d8af4a25971b Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:55 +0900
-Subject: [PATCH 14/18] misc: add Gustard R26 boot-stage breadcrumbs (test
+Subject: [PATCH 14/26] misc: add Gustard R26 boot-stage breadcrumbs (test
  only)
 
 Bring-up aid, not for upstream: writes boot stage markers into the
@@ -71,6 +71,3 @@ index 0000000000..5da611291a
 +core_initcall(r26_mark_core);
 +device_initcall(r26_mark_device);
 +late_initcall_sync(r26_mark_late);
--- 
-2.56.0
-

@@ -1,5 +1,7 @@
 # R26 mainline port status
 
+> Early working log, kept for history. Current state: `README.md` and `re/FINDINGS.md`.
+
 Plan: `~/.claude/plans/read-handover-md-and-plan-snuggly-lerdorf.md`. RE results: `re/FINDINGS.md`.
 
 ## Tree

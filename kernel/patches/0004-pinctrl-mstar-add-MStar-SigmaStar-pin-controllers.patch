@@ -1,7 +1,7 @@
 From 02e0a198795d2e28b84dd76c7b039684547c3e6d Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:54 +0900
-Subject: [PATCH 04/18] pinctrl: mstar: add MStar/SigmaStar pin controllers
+Subject: [PATCH 04/26] pinctrl: mstar: add MStar/SigmaStar pin controllers
 
 Add the common MStar pinctrl code and the msc313, PM and ssd210
 pin controller drivers.
@@ -4168,6 +4168,3 @@ index 0000000000..1d1af75a3c
 +#define PIN_SSD212_PM_UART_RX		123
 +
 +#endif
--- 
-2.56.0
-

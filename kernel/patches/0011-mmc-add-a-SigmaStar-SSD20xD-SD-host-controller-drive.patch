@@ -1,7 +1,7 @@
 From 57577fe6ca95848d83702df765f3d34ced233dcb Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:55 +0900
-Subject: [PATCH 11/18] mmc: add a SigmaStar SSD20xD SD host controller driver
+Subject: [PATCH 11/26] mmc: add a SigmaStar SSD20xD SD host controller driver
 
 New driver for the SD host ("SDIO v5") of SigmaStar SSD20xD
 (Infinity2M) SoCs. The register programming follows the vendor HAL that
@@ -760,6 +760,3 @@ index 0000000000..2a69c4b4b5
 +
 +MODULE_DESCRIPTION("SigmaStar SSD20xD SD host controller");
 +MODULE_LICENSE("GPL");
--- 
-2.56.0
-

@@ -1,0 +1,79 @@
+From a1ab141de8261acb16398fbbd25db712d18d34de Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 23:19:48 +0900
+Subject: [PATCH 25/26] ARM: mstar: keep AXI exclusive access on and serialise
+ the MIU pipe flush
+
+The vendor kernels for every Infinity SoC enable "AXI exclusive access",
+bit 4 of the L3 bridge flush register, at init, and their MIU pipe flush
+writes 0x10 then 0x11 under a spinlock, so the bit stays set and only one
+CPU drives the fire bit at a time. mstarv7_mb() wrote 0 then 1 without a
+lock, clearing the bit on every barrier.
+
+Do it the vendor's way: set the bit once in mstarv7_init(), keep it set in
+the flush, and take a raw spinlock around the toggle and the wait.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm/mach-mstar/mstarv7.c | 27 ++++++++++++++++++++++-----
+ 1 file changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm/mach-mstar/mstarv7.c b/arch/arm/mach-mstar/mstarv7.c
+index 274c4f0df2..4820118ff9 100644
+--- a/arch/arm/mach-mstar/mstarv7.c
++++ b/arch/arm/mach-mstar/mstarv7.c
+@@ -29,6 +29,7 @@
+ #define MSTARV7_L3BRIDGE_FLUSH		0x14
+ #define MSTARV7_L3BRIDGE_STATUS		0x40
+ #define MSTARV7_L3BRIDGE_FLUSH_TRIGGER	BIT(0)
++#define MSTARV7_L3BRIDGE_AXI_EXCLUSIVE	BIT(4)
+ #define MSTARV7_L3BRIDGE_STATUS_DONE	BIT(12)
+ 
+ #ifdef CONFIG_SMP
+@@ -58,16 +59,28 @@ static const char * const mstarv7_board_dt_compat[] __initconst = {
+  * [writel|readl]_relaxed have to be used here because otherwise
+  * we'd end up right back in here.
+  */
++static DEFINE_RAW_SPINLOCK(mstarv7_mb_lock);
++
+ static void mstarv7_mb(void)
+ {
+-	/* toggle the flush miu pipe fire bit */
+-	writel_relaxed(0, l3bridge + MSTARV7_L3BRIDGE_FLUSH);
+-	writel_relaxed(MSTARV7_L3BRIDGE_FLUSH_TRIGGER, l3bridge
+-			+ MSTARV7_L3BRIDGE_FLUSH);
++	unsigned long flags;
++
++	/*
++	 * Toggle the flush miu pipe fire bit, one CPU at a time and with AXI
++	 * exclusive access left enabled, as the vendor kernel does
++	 * (mstar_chip_flush_miu_pipe: 0x10, 0x11 under a spinlock).
++	 */
++	raw_spin_lock_irqsave(&mstarv7_mb_lock, flags);
++	writel_relaxed(MSTARV7_L3BRIDGE_AXI_EXCLUSIVE,
++		       l3bridge + MSTARV7_L3BRIDGE_FLUSH);
++	writel_relaxed(MSTARV7_L3BRIDGE_AXI_EXCLUSIVE |
++		       MSTARV7_L3BRIDGE_FLUSH_TRIGGER,
++		       l3bridge + MSTARV7_L3BRIDGE_FLUSH);
+ 	while (!(readl_relaxed(l3bridge + MSTARV7_L3BRIDGE_STATUS)
+ 			& MSTARV7_L3BRIDGE_STATUS_DONE)) {
+ 		/* wait for flush to complete */
+ 	}
++	raw_spin_unlock_irqrestore(&mstarv7_mb_lock, flags);
+ }
+ 
+ #ifdef CONFIG_SMP
+@@ -116,8 +129,12 @@ static void __init mstarv7_init(void)
+ 
+ 	np = of_find_compatible_node(NULL, NULL, "mstar,l3bridge");
+ 	l3bridge = of_iomap(np, 0);
+-	if (l3bridge)
++	if (l3bridge) {
++		/* enable AXI exclusive access (vendor mstar_init_early) */
++		writel_relaxed(MSTARV7_L3BRIDGE_AXI_EXCLUSIVE,
++			       l3bridge + MSTARV7_L3BRIDGE_FLUSH);
+ 		soc_mb = mstarv7_mb;
++	}
+ 	else
+ 		pr_warn("Failed to install memory barrier, DMA will be broken!\n");
+ }

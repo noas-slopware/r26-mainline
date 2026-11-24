@@ -1,7 +1,7 @@
 From 9a3560c1f41db5af60d64e4bc14650574ac2ebed Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:55 +0900
-Subject: [PATCH 10/18] net: macb: add MStar/SigmaStar EMAC support
+Subject: [PATCH 10/26] net: macb: add MStar/SigmaStar EMAC support
 
 The MStar/SigmaStar EMAC is an AT91RM9200 style MACB behind the RIU,
 where every 32-bit register is split over two 16-bit slots.
@@ -548,6 +548,3 @@ index 0000000000..846052ec4f
 +}
 +
 +#endif
--- 
-2.56.0
-

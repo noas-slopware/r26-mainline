@@ -1,0 +1,82 @@
+From 0b505d966503823e5f3d2102cd7b17bb7b9d5f78 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 23:09:17 +0900
+Subject: [PATCH 23/26] net: macb: MStar: read the statistics counters through
+ the X32 bank
+
+The MStar/SigmaStar EMAC sits behind the RIU, where each 32-bit register
+is split over two 16-bit slots. The vendor HAL does not use that window
+for registers below 0x100; it reads them through a second "X32" bank as
+plain 32-bit accesses. Read through the split window, the upper half of
+the statistics counters comes back as garbage, which made the interface
+counters grow in steps of 0x10000.
+
+Map the X32 bank when the DT gives it as a second register range and read
+the statistics through it. Add the range to the Gustard R26 EMAC node.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../mstar-infinity2m-ssd202d-gustard-r26.dts      |  2 ++
+ drivers/net/ethernet/cadence/macb.h               |  2 ++
+ drivers/net/ethernet/cadence/macb_main.c          | 15 ++++++++++++++-
+ 3 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+index 6e09fb4e3a..3acd2f132d 100644
+--- a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
++++ b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+@@ -100,6 +100,8 @@ &pm_uart {
+ 
+ /* eth0: EMAC with the SoC's integrated 10/100 PHY */
+ &emac {
++	/* second range: the X32 bank the vendor reads registers below 0x100 through */
++	reg = <0x2a2000 0x800>, <0x343c00 0x600>;
+ 	/* no stored MAC on this board: derive a stable one from the SoC UID */
+ 	sstar,efuse = <&efuse>;
+ 	status = "okay";
+diff --git a/drivers/net/ethernet/cadence/macb.h b/drivers/net/ethernet/cadence/macb.h
+index b022876f8f..d6708d9ef4 100644
+--- a/drivers/net/ethernet/cadence/macb.h
++++ b/drivers/net/ethernet/cadence/macb.h
+@@ -1363,6 +1363,8 @@ struct macb {
+ #define MACB_RM9200_TXQ_MAX	4
+ 	struct macb_tx_skb	rm9200_txq[MACB_RM9200_TXQ_MAX];
+ 	unsigned int		rm9200_txq_len;
++	/* MStar: the X32 bank, where registers below 0x100 (statistics) read as plain 32 bit */
++	void __iomem		*mstar_x32;
+ 	unsigned int		rm9200_tx_tail;
+ 	unsigned int		rm9200_tx_len;
+ 	unsigned int		max_tx_length;
+diff --git a/drivers/net/ethernet/cadence/macb_main.c b/drivers/net/ethernet/cadence/macb_main.c
+index 21401b7019..a93931fa84 100644
+--- a/drivers/net/ethernet/cadence/macb_main.c
++++ b/drivers/net/ethernet/cadence/macb_main.c
+@@ -1243,7 +1243,8 @@ static void macb_update_stats(struct macb *bp)
+ 	WARN_ON((unsigned long)(end - p - 1) != (MACB_TPF - MACB_PFR) / 4);
+ 
+ 	for (; p < end; p++, offset += 4)
+-		*p += bp->macb_reg_readl(bp, offset);
++		*p += bp->mstar_x32 ? readl_relaxed(bp->mstar_x32 + offset * 2) :
++				      bp->macb_reg_readl(bp, offset);
+ }
+ 
+ static int macb_halt_tx(struct macb *bp)
+@@ -6078,6 +6079,18 @@ static int macb_probe(struct platform_device *pdev)
+ 	if (macb_config->caps & MACB_CAPS_MSTAR_RIU) {
+ 		bp->macb_reg_readl = hw_readl_riu;
+ 		bp->macb_reg_writel = hw_writel_riu;
++		/*
++		 * The vendor HAL reads every register below 0x100 through the
++		 * X32 bank as one 32-bit access. Through the split RIU window the
++		 * statistics counters' upper half reads garbage, which piled up
++		 * in steps of 0x10000. Use the X32 bank for them when the DT
++		 * provides it.
++		 */
++		if (platform_get_resource(pdev, IORESOURCE_MEM, 1)) {
++			bp->mstar_x32 = devm_platform_ioremap_resource(pdev, 1);
++			if (IS_ERR(bp->mstar_x32))
++				bp->mstar_x32 = NULL;
++		}
+ 	}
+ 	bp->rm9200_txq_len = macb_config->rm9200_txq_len ?: 2;
+ 	bp->num_queues = num_queues;

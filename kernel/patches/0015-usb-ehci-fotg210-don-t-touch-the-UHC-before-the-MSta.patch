@@ -1,7 +1,7 @@
 From 6e75207d994687e9b47759cfad8315f873b5117b Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 15:14:41 +0900
-Subject: [PATCH 15/18] usb: ehci-fotg210: don't touch the UHC before the MStar
+Subject: [PATCH 15/26] usb: ehci-fotg210: don't touch the UHC before the MStar
  USB bring-up
 
 The probe read the capability register to locate the operational
@@ -71,6 +71,3 @@ index fa06220627..41fa08e23d 100644
  
  	if (dev->of_node && of_device_is_compatible(dev->of_node,
  			"faraday,fotg210"))
--- 
-2.56.0
-

@@ -1,7 +1,7 @@
 From 8c2404befad68f270279fb52dad1110437f5bf58 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 15:14:41 +0900
-Subject: [PATCH 17/18] ARM: dts: sigmastar: gustard-r26: production settings
+Subject: [PATCH 17/26] ARM: dts: sigmastar: gustard-r26: production settings
 
 - bootargs as the stock U-Boot environment gives them, for boot paths
   that pass this DTB unchanged
@@ -81,6 +81,3 @@ index 0ca190d948..6d1718d1f4 100644
  	clock-frequency = <172000000>;
  	/delete-property/ clocks;
  	/delete-property/ pinctrl-names;
--- 
-2.56.0
-

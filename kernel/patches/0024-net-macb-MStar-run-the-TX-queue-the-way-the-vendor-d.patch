@@ -1,0 +1,563 @@
+From 74abe5abcb9688b5eecf102de544624b921585cb Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 23:09:27 +0900
+Subject: [PATCH 24/26] net: macb: MStar: run the TX queue the way the vendor
+ driver does
+
+The MStar/SigmaStar EMAC corrupted transmitted frames: streaming 300 MiB
+from the Gustard R26 to another host produced about 14,800 TCP checksum
+errors at the receiver (about 7% of the segments), and every 50-200 MB an
+SSH session died on a MAC check failure.
+
+The completion path counted free TX FIFO slots from TSR and took them as
+finished frames, so buffers the MAC was still reading were unmapped and
+reused. Rework the MStar path after the shipped vendor driver
+(TX_QUEUE_SIZE_NEW 127, descriptor-less queue mode):
+
+- enable the 127-entry TX queue behind the 4-entry FIFO and keep the
+  room accounting in software;
+- insert a frame by writing TAR then TCR through the X32 bank;
+- reclaim on every transmit and interrupt: the frames the MAC still holds
+  are the FIFO entries in use plus the latched new-queue count, everything
+  older is done and is freed oldest first;
+- give the MAC 64-byte aligned buffers, copying unaligned or fragmented
+  frames into a bounce buffer;
+- reset the transmitter on underrun, and leave TBRE masked as the vendor
+  does;
+- apply the vendor's MIU/burst settings (JULIAN_100/134/138).
+
+With this, 3 x 300 MiB from the R26 arrive with no checksum errors and
+the same sha256, at 8.3 MB/s (9.4 MB/s before, with the corruption).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/net/ethernet/cadence/macb.h      |  37 ++-
+ drivers/net/ethernet/cadence/macb_main.c | 346 +++++++++++++++++++++--
+ 2 files changed, 349 insertions(+), 34 deletions(-)
+
+diff --git a/drivers/net/ethernet/cadence/macb.h b/drivers/net/ethernet/cadence/macb.h
+index d6708d9ef4..27879f9de0 100644
+--- a/drivers/net/ethernet/cadence/macb.h
++++ b/drivers/net/ethernet/cadence/macb.h
+@@ -77,8 +77,22 @@
+ /* MStar/SigmaStar EMAC extra registers */
+ #define MACB_MSC313_JULIAN_100	0x100
+ #define MACB_MSC313_JULIAN_104	0x104
++#define MACB_MSC313_JULIAN_134	0x134
++#define MACB_MSC313_JULIAN_138	0x138
+ #define MACB_MSC313_13A		0x13A
+ 
++/*
++ * MStar/SigmaStar EMAC1 bank 16-bit registers h23/h24 (macb offsets 0x146 and
++ * 0x148), given as byte offsets into the RIU window for 8-bit access, the way
++ * the vendor HAL touches them (MHal_EMAC_ReadReg8/WritReg8).
++ */
++#define MSC313_EMAC1_H23	0x28c	/* bit 3: latch the new TX queue count */
++#define MSC313_TXQ_CNT_LATCH	BIT(3)
++#define MSC313_EMAC1_H24	0x290	/* bits 6:0: frames in the new TX queue */
++#define MSC313_TXQ_CNT_MASK	0x7f
++#define MSC313_EMAC1_H24_HI	0x291	/* bit 7: new TX queue enable */
++#define MSC313_TXQ_NEW_EN	BIT(7)
++
+ /* GEM register offsets. */
+ #define GEM_NCR			0x0000 /* Network Control */
+ #define GEM_NCFGR		0x0004 /* Network Config */
+@@ -794,7 +808,7 @@
+ #define MACB_CAPS_USRIO_HAS_TSUCLK_SOURCE	BIT(28)
+ /* MStar/SigmaStar EMAC: 32-bit registers split over two 16-bit RIU slots */
+ #define MACB_CAPS_MSTAR_RIU			BIT(29)
+-/* MStar/SigmaStar EMAC: 4-entry TX queue, free count encoded in TSR */
++/* MStar/SigmaStar EMAC: 4-entry TX FIFO plus a 127-entry TX queue */
+ #define MACB_CAPS_MSTAR_TXQ			BIT(30)
+ 
+ /* LSO settings */
+@@ -992,6 +1006,21 @@ struct macb_tx_skb {
+ 	bool			mapped_as_page;
+ };
+ 
++/*
++ * MStar/SigmaStar EMAC TX slot: a frame handed to the MAC, either an aligned
++ * linear skb mapped in place or a copy in a driver-owned bounce buffer.
++ */
++#define MSC313_TXQ_LEN		(4 + 127)	/* TX FIFO + new TX queue */
++#define MSC313_TX_ALIGN		64
++#define MSC313_TX_BUF_SIZE	2048
++
++struct macb_mstar_tx {
++	struct sk_buff		*skb;
++	void			*buf;
++	dma_addr_t		mapping;
++	unsigned int		size;
++};
++
+ /* Hardware-collected statistics. Used when updating the network
+  * device stats by a periodic timer.
+  */
+@@ -1358,13 +1387,15 @@ struct macb {
+ 
+ 	/*
+ 	 * AT91RM9200-style transmit queue: 1 on wire + 1 queued on the
+-	 * AT91RM9200, 4 on MStar/SigmaStar EMACs.
++	 * AT91RM9200. MStar/SigmaStar EMACs use mstar_txq instead.
+ 	 */
+-#define MACB_RM9200_TXQ_MAX	4
++#define MACB_RM9200_TXQ_MAX	2
+ 	struct macb_tx_skb	rm9200_txq[MACB_RM9200_TXQ_MAX];
+ 	unsigned int		rm9200_txq_len;
+ 	/* MStar: the X32 bank, where registers below 0x100 (statistics) read as plain 32 bit */
+ 	void __iomem		*mstar_x32;
++	/* MStar: MSC313_TXQ_LEN slots, indexed by rm9200_tx_tail/rm9200_tx_len */
++	struct macb_mstar_tx	*mstar_txq;
+ 	unsigned int		rm9200_tx_tail;
+ 	unsigned int		rm9200_tx_len;
+ 	unsigned int		max_tx_length;
+diff --git a/drivers/net/ethernet/cadence/macb_main.c b/drivers/net/ethernet/cadence/macb_main.c
+index a93931fa84..647ee72a6c 100644
+--- a/drivers/net/ethernet/cadence/macb_main.c
++++ b/drivers/net/ethernet/cadence/macb_main.c
+@@ -5072,13 +5072,35 @@ static void at91ether_free_coherent(struct macb *bp)
+ 	}
+ }
+ 
++/* MStar: give back the buffer of a TX slot the MAC is done with */
++static void msc313_tx_release(struct macb *bp, struct macb_mstar_tx *s)
++{
++	dma_unmap_single(&bp->pdev->dev, s->mapping, s->size, DMA_TO_DEVICE);
++	if (s->skb)
++		dev_consume_skb_any(s->skb);
++	kfree(s->buf);
++	memset(s, 0, sizeof(*s));
++}
++
++/* MStar: drop every frame still queued; TE must already be off */
++static void msc313_tx_free_all(struct macb *bp)
++{
++	unsigned int i;
++
++	for (i = 0; i < MSC313_TXQ_LEN; i++)
++		if (bp->mstar_txq[i].size)
++			msc313_tx_release(bp, &bp->mstar_txq[i]);
++	bp->rm9200_tx_tail = 0;
++	bp->rm9200_tx_len = 0;
++}
++
+ /* Initialize and start the Receiver and Transmit subsystems */
+ static int at91ether_start(struct macb *bp)
+ {
+ 	struct macb_queue *queue = &bp->queues[0];
+ 	struct macb_dma_desc *desc;
+ 	dma_addr_t addr;
+-	u32 ctl;
++	u32 ctl, ier;
+ 	int i, ret;
+ 
+ 	ret = at91ether_alloc_coherent(bp);
+@@ -5101,6 +5123,8 @@ static int at91ether_start(struct macb *bp)
+ 
+ 	/* Reset the transmit queue */
+ 	memset(bp->rm9200_txq, 0, sizeof(bp->rm9200_txq));
++	if (bp->caps & MACB_CAPS_MSTAR_TXQ)
++		memset(bp->mstar_txq, 0, MSC313_TXQ_LEN * sizeof(*bp->mstar_txq));
+ 	bp->rm9200_tx_tail = 0;
+ 	bp->rm9200_tx_len = 0;
+ 
+@@ -5112,14 +5136,20 @@ static int at91ether_start(struct macb *bp)
+ 	macb_writel(bp, NCR, ctl | MACB_BIT(RE) | MACB_BIT(TE));
+ 
+ 	/* Enable MAC interrupts */
+-	macb_writel(bp, IER, MACB_BIT(RCOMP)	|
+-			     MACB_BIT(RXUBR)	|
+-			     MACB_BIT(ISR_TUND)	|
+-			     MACB_BIT(ISR_RLE)	|
+-			     MACB_BIT(TCOMP)	|
+-			     MACB_BIT(RM9200_TBRE)	|
+-			     MACB_BIT(ISR_ROVR)	|
+-			     MACB_BIT(HRESP));
++	ier = MACB_BIT(RCOMP)		|
++	      MACB_BIT(RXUBR)		|
++	      MACB_BIT(ISR_TUND)	|
++	      MACB_BIT(ISR_RLE)		|
++	      MACB_BIT(TCOMP)		|
++	      MACB_BIT(ISR_ROVR)	|
++	      MACB_BIT(HRESP);
++	/*
++	 * MStar: the vendor driver never enables TBRE (mdrv_emac.c:1528-1531).
++	 * Completions are counted from the queue registers instead.
++	 */
++	if (!(bp->caps & MACB_CAPS_MSTAR_TXQ))
++		ier |= MACB_BIT(RM9200_TBRE);
++	macb_writel(bp, IER, ier);
+ 
+ 	return 0;
+ }
+@@ -5143,6 +5173,13 @@ static void at91ether_stop(struct macb *bp)
+ 	macb_writel(bp, NCR, ctl & ~(MACB_BIT(TE) | MACB_BIT(RE)));
+ 
+ 	/* Free resources. */
++	if (bp->caps & MACB_CAPS_MSTAR_TXQ) {
++		unsigned long flags;
++
++		spin_lock_irqsave(&bp->lock, flags);
++		msc313_tx_free_all(bp);
++		spin_unlock_irqrestore(&bp->lock, flags);
++	}
+ 	at91ether_free_coherent(bp);
+ }
+ 
+@@ -5205,7 +5242,12 @@ static unsigned int at91ether_txqfree(struct macb *bp, u32 tsr)
+ 	unsigned int n;
+ 
+ 	if (bp->caps & MACB_CAPS_MSTAR_TXQ) {
+-		/* MStar: one "slot idle" bit per FIFO entry in TSR[4:3] and TSR[12:7] */
++		/*
++		 * MStar: free entries of the 4-entry TX FIFO, as
++		 * MHal_EMAC_QueueFree_4() counts them (mhal_emac.c:1773-1803):
++		 * IDLETSR, BNQ, TBNQ, FBNQ and FIFO1..4IDLE (TSR bits 3, 4 and
++		 * 7..12), minus 4. This is free FIFO slots, not completed frames.
++		 */
+ 		n = hweight32(((tsr >> 3) & 0x3) | (((tsr >> 7) & 0x3f) << 2));
+ 		return n > 4 ? n - 4 : 0;
+ 	}
+@@ -5221,6 +5263,187 @@ static unsigned int at91ether_txqfree(struct macb *bp, u32 tsr)
+ 	       (tsr & MACB_BIT(RM9200_BNQ)) ? 1 : 0;
+ }
+ 
++/*
++ * MStar/SigmaStar EMAC TX queue, run the way the vendor driver shipped on the
++ * SSD202D runs it (drivers/sstar/emac with the infinity2m HAL; the shipped
++ * _MHal_EMAC_TXQ_Used/_Free, _MDev_EMAC_tx_pump and MHal_EMAC_HW_init match
++ * that source): TX_QUEUE_SIZE_NEW 127, TX_QUEUE_CNT_SCHE 2, TXD_CAP 0, so
++ * descriptor-less TXQ mode with 4 + 127 entries.
++ *
++ * - Room is decided in software only: the frames handed to the MAC and not
++ *   reclaimed yet must stay below the queue size (skb_queue_free(.., 0),
++ *   mdrv_emac.c:678-690 and 1855-1858). TSR is not consulted before insert.
++ * - Insert is TAR then TCR, nothing else (_MHal_EMAC_TXQ_Insert,
++ *   mhal_emac.c:1909-1914). Once TCR is written the MAC owns the frame.
++ * - Completion: the frames the MAC still holds are 4 - QueueFree_4(TSR) in
++ *   the FIFO plus the latched new-queue count (_MHal_EMAC_TXQ_Used,
++ *   mhal_emac.c:1883-1897). Every frame handed over beyond that is done and
++ *   is freed oldest first (_MDev_EMAC_tx_pump, mdrv_emac.c:1834-1850). This
++ *   runs on every transmit and every interrupt, whatever its cause
++ *   (mdrv_emac.c:2097, 2693).
++ */
++
++/* Registers below 0x100 the vendor accesses through the X32 bank */
++static void __iomem *msc313_x32(struct macb *bp, unsigned int offset)
++{
++	return bp->mstar_x32 + offset * 2;
++}
++
++static u32 msc313_read_tsr(struct macb *bp)
++{
++	if (bp->mstar_x32)
++		return readl_relaxed(msc313_x32(bp, MACB_TSR));
++	return macb_readl(bp, TSR);
++}
++
++/* Frames the MAC holds (FIFO + new queue), with TSR OVR returned in *ovr */
++static unsigned int msc313_txq_used(struct macb *bp, bool *ovr)
++{
++	unsigned int newq;
++	u32 tsr;
++	u8 v;
++
++	/*
++	 * MHal_EMAC_QueueUsed_New(), scheme 2 (mhal_emac.c:1843-1852): latch
++	 * the count with EMAC1 h23 bit 3, then read EMAC1 h24[6:0]. Read it
++	 * before TSR: a frame moving from the new queue into the FIFO between
++	 * the two reads is then counted twice (reclaimed later), never missed
++	 * (which would free a frame the MAC is still reading).
++	 */
++	v = readb_relaxed(bp->regs + MSC313_EMAC1_H23);
++	writeb_relaxed(v | MSC313_TXQ_CNT_LATCH, bp->regs + MSC313_EMAC1_H23);
++	newq = readb_relaxed(bp->regs + MSC313_EMAC1_H24) & MSC313_TXQ_CNT_MASK;
++
++	tsr = msc313_read_tsr(bp);
++	if (tsr & MACB_BIT(RM9200_OVR)) {
++		/* write 1 to clear */
++		if (bp->mstar_x32)
++			writel_relaxed(MACB_BIT(RM9200_OVR), msc313_x32(bp, MACB_TSR));
++		else
++			macb_writel(bp, TSR, MACB_BIT(RM9200_OVR));
++		*ovr = true;
++	}
++
++	return 4 + newq - at91ether_txqfree(bp, tsr);
++}
++
++/* Free every frame the MAC is done with; called with bp->lock held */
++static bool msc313_tx_reclaim(struct macb *bp)
++{
++	struct net_device *netdev = bp->netdev;
++	bool ovr = false;
++	unsigned int used;
++
++	used = msc313_txq_used(bp, &ovr);
++	while (bp->rm9200_tx_len > used) {
++		unsigned int i = (bp->rm9200_tx_tail + MSC313_TXQ_LEN -
++				  bp->rm9200_tx_len) % MSC313_TXQ_LEN;
++		struct macb_mstar_tx *s = &bp->mstar_txq[i];
++
++		netdev->stats.tx_packets++;
++		netdev->stats.tx_bytes += s->size;
++		msc313_tx_release(bp, s);
++		bp->rm9200_tx_len--;
++	}
++
++	return ovr;
++}
++
++static netdev_tx_t msc313_start_xmit(struct sk_buff *skb,
++				     struct net_device *netdev)
++{
++	struct macb *bp = netdev_priv(netdev);
++	struct device *dev = &bp->pdev->dev;
++	unsigned int len = skb->len;
++	netdev_tx_t ret = NETDEV_TX_OK;
++	bool ovr, map_err = false;
++	struct macb_mstar_tx *s;
++	unsigned long flags;
++
++	/* Drop what cannot fit a bounce buffer, as the vendor drops > 1524 (mdrv_emac.c:1906) */
++	if (unlikely(len > MSC313_TX_BUF_SIZE)) {
++		dev_kfree_skb_any(skb);
++		netdev->stats.tx_dropped++;
++		return NETDEV_TX_OK;
++	}
++
++	spin_lock_irqsave(&bp->lock, flags);
++
++	ovr = msc313_tx_reclaim(bp);
++
++	if (bp->rm9200_tx_len == MSC313_TXQ_LEN) {
++		netif_stop_queue(netdev);
++		ret = NETDEV_TX_BUSY;
++		goto out;
++	}
++
++	s = &bp->mstar_txq[bp->rm9200_tx_tail];
++	s->size = len;
++	if (!skb_is_nonlinear(skb) &&
++	    IS_ALIGNED((unsigned long)skb->data, MSC313_TX_ALIGN)) {
++		/* Aligned linear frame: the MAC reads the skb itself (mdrv_emac.c:2023-2040) */
++		s->skb = skb;
++		s->mapping = dma_map_single(dev, skb->data, len, DMA_TO_DEVICE);
++	} else {
++		/*
++		 * Anything else goes through a 64-byte aligned copy the driver
++		 * owns, as the vendor does (TXQ_NF_PKT_ALIGN, mdrv_emac.h:83-86,
++		 * mdrv_emac.c:1952-2022; the shipped MDev_EMAC_tx tests
++		 * skb->data & 0x3f the same way). kmalloc() of a power-of-two
++		 * size is naturally aligned.
++		 */
++		s->buf = kmalloc(MSC313_TX_BUF_SIZE, GFP_ATOMIC);
++		if (!s->buf) {
++			memset(s, 0, sizeof(*s));
++			dev_kfree_skb_any(skb);
++			netdev->stats.tx_dropped++;
++			goto out;
++		}
++		skb_copy_bits(skb, 0, s->buf, len);
++		s->mapping = dma_map_single(dev, s->buf, len, DMA_TO_DEVICE);
++	}
++	if (dma_mapping_error(dev, s->mapping)) {
++		kfree(s->buf);
++		memset(s, 0, sizeof(*s));
++		dev_kfree_skb_any(skb);
++		netdev->stats.tx_dropped++;
++		map_err = true;
++		goto out;
++	}
++	if (s->buf)
++		dev_consume_skb_any(skb);
++
++	/*
++	 * TAR then TCR, as single 32-bit writes through the X32 bank like the
++	 * vendor HAL (MHal_EMAC_WritReg32 for offsets below 0x100). The
++	 * barrier in writel() flushes the MIU pipe before the MAC sees TAR.
++	 */
++	if (bp->mstar_x32) {
++		writel(s->mapping, msc313_x32(bp, MACB_TAR));
++		writel_relaxed(len, msc313_x32(bp, MACB_TCR));
++	} else {
++		macb_writel(bp, TAR, s->mapping);
++		macb_writel(bp, TCR, len);
++	}
++
++	bp->rm9200_tx_tail = (bp->rm9200_tx_tail + 1) % MSC313_TXQ_LEN;
++	bp->rm9200_tx_len++;
++
++	if (bp->rm9200_tx_len == MSC313_TXQ_LEN)
++		netif_stop_queue(netdev);
++
++out:
++	spin_unlock_irqrestore(&bp->lock, flags);
++	/* Never print while holding bp->lock (netconsole re-enters start_xmit) */
++	if (ovr)
++		net_warn_ratelimited("%s: TX queue overrun (TSR OVR)\n",
++				     netdev->name);
++	if (map_err)
++		net_err_ratelimited("%s: %s: DMA mapping error\n",
++				    netdev->name, __func__);
++	return ret;
++}
++
+ /* Transmit packet */
+ static netdev_tx_t at91ether_start_xmit(struct sk_buff *skb,
+ 					struct net_device *netdev)
+@@ -5233,6 +5456,9 @@ static netdev_tx_t at91ether_start_xmit(struct sk_buff *skb,
+ 	unsigned int desc;
+ 	u32 tsr;
+ 
++	if (bp->caps & MACB_CAPS_MSTAR_TXQ)
++		return msc313_start_xmit(skb, netdev);
++
+ 	spin_lock_irqsave(&bp->lock, flags);
+ 
+ 	/* Queue full but xmit got called anyway */
+@@ -5264,21 +5490,6 @@ static netdev_tx_t at91ether_start_xmit(struct sk_buff *skb,
+ 	/* Set length of the packet in the Transmit Control register */
+ 	macb_writel(bp, TCR, skb->len);
+ 
+-	/* The MStar EMAC flags a frame it did not accept with OVR */
+-	if (bp->caps & MACB_CAPS_MSTAR_TXQ) {
+-		tsr = macb_readl(bp, TSR);
+-		if (tsr & MACB_BIT(RM9200_OVR)) {
+-			macb_writel(bp, TSR, MACB_BIT(RM9200_OVR));
+-			dma_unmap_single(dev, bp->rm9200_txq[desc].mapping,
+-					 bp->rm9200_txq[desc].size,
+-					 DMA_TO_DEVICE);
+-			bp->rm9200_txq[desc].skb = NULL;
+-			netdev->stats.tx_errors++;
+-			ret = NETDEV_TX_BUSY;
+-			goto out;
+-		}
+-	}
+-
+ 	bp->rm9200_tx_tail = (desc + 1) % bp->rm9200_txq_len;
+ 	bp->rm9200_tx_len++;
+ 
+@@ -5370,8 +5581,41 @@ static irqreturn_t at91ether_interrupt(int irq, void *dev_id)
+ 	if (intstatus & MACB_BIT(RCOMP))
+ 		at91ether_rx(netdev);
+ 
++	if (bp->caps & MACB_CAPS_MSTAR_TXQ) {
++		bool tund = false, ovr;
++
++		spin_lock(&bp->lock);
++		/*
++		 * Underrun: the vendor resets the transmitter, TE off for 1 ms
++		 * and on again (_MDrv_EMAC_ISR_TCOM -> MDev_EMAC_TxReset,
++		 * mdrv_emac.c:2519-2531 and 1644-1659). Whatever the MAC drops
++		 * then no longer counts as held and is reclaimed below.
++		 */
++		if ((intstatus & MACB_BIT(TCOMP)) &&
++		    (intstatus & MACB_BIT(ISR_TUND))) {
++			ctl = macb_readl(bp, NCR);
++			macb_writel(bp, NCR, ctl & ~MACB_BIT(TE));
++			mdelay(1);
++			macb_writel(bp, NCR, macb_readl(bp, NCR) | MACB_BIT(TE));
++			tund = true;
++		}
++		/* Reclaim on every interrupt (MDev_EMAC_interrupt, mdrv_emac.c:2693) */
++		ovr = msc313_tx_reclaim(bp);
++		if (bp->rm9200_tx_len < MSC313_TXQ_LEN)
++			netif_wake_queue(netdev);
++		spin_unlock(&bp->lock);
++
++		if (tund)
++			net_warn_ratelimited("%s: TX underrun, transmitter reset\n",
++					     netdev->name);
++		if (ovr)
++			net_warn_ratelimited("%s: TX queue overrun (TSR OVR)\n",
++					     netdev->name);
++	}
++
+ 	/* Transmit complete */
+-	if (intstatus & (MACB_BIT(TCOMP) | MACB_BIT(RM9200_TBRE))) {
++	if (!(bp->caps & MACB_CAPS_MSTAR_TXQ) &&
++	    (intstatus & (MACB_BIT(TCOMP) | MACB_BIT(RM9200_TBRE)))) {
+ 		unsigned int done;
+ 
+ 		/* The TCOM bit is set even if the transmission failed */
+@@ -5825,6 +6069,8 @@ static int msc313_init(struct platform_device *pdev)
+ 	struct net_device *netdev = platform_get_drvdata(pdev);
+ 	struct macb *bp = netdev_priv(netdev);
+ 	struct device_node *phy_node;
++	bool ext_phy = false;
++	u32 val;
+ 
+ 	/*
+ 	 * Whatever ran before us (vendor kernel, bootloader) may have left
+@@ -5843,19 +6089,58 @@ static int msc313_init(struct platform_device *pdev)
+ 	 * memory, so this is required.
+ 	 */
+ 	macb_writel(bp, MSC313_13A, 0x100);
++
++	/*
++	 * The MAC/MIU setup of the vendor's MHal_EMAC_HW_init()
++	 * (mhal_emac.c:977-1037), in its order:
++	 * Set_Miu_Priority(1): JULIAN_100[31:16] cleared, bit 19 set.
++	 */
++	val = macb_readl(bp, MSC313_JULIAN_100);
++	macb_writel(bp, MSC313_JULIAN_100, (val & 0xffff) | BIT(19));
++	/*
++	 * JULIAN_134: Set_Tx_JULIAN_T(4) [23:20], Set_Rx_Tx_Burst16_Mode(1)
++	 * bit 29, Set_Rx_FIFO_Enlarge(2) [25:24], Set_Tx_Hang_Fix_ECO(1)
++	 * bit 18, Set_MIU_Out_Of_Range_Fix(1) bit 28.
++	 */
++	val = macb_readl(bp, MSC313_JULIAN_134);
++	val = (val & ~GENMASK(23, 20)) | (4 << 20);
++	val |= BIT(29);
++	val = (val & ~GENMASK(25, 24)) | (2 << 24);
++	val |= BIT(18) | BIT(28);
++	macb_writel(bp, MSC313_JULIAN_134, val);
++	macb_writel(bp, MSC313_JULIAN_138,
++		    macb_readl(bp, MSC313_JULIAN_138) | BIT(0));
++
+ 	macb_writel(bp, MSC313_JULIAN_104, 1);
+ 
+ 	/*
+-	 * Magic needed for an external (RMII) PHY on SSD20xD. The
+-	 * integrated PHY needs nothing here.
++	 * Enable the 127-entry TX queue behind the 4-entry FIFO
++	 * (_MHal_EMAC_TXQ_Enable, mhal_emac.c:1760-1771: EMAC1 h24 bit 15).
++	 * msc313_start_xmit() relies on it: it queues up to MSC313_TXQ_LEN.
+ 	 */
++	writeb(readb(bp->regs + MSC313_EMAC1_H24_HI) | MSC313_TXQ_NEW_EN,
++	       bp->regs + MSC313_EMAC1_H24_HI);
++
+ 	phy_node = of_parse_phandle(pdev->dev.of_node, "phy-handle", 0);
+ 	if (phy_node) {
+-		if (!of_property_read_bool(phy_node, "phy-is-integrated"))
+-			macb_writel(bp, MSC313_JULIAN_100, 0xf017);
++		ext_phy = !of_property_read_bool(phy_node, "phy-is-integrated");
+ 		of_node_put(phy_node);
+ 	}
+ 
++	/*
++	 * MHal_EMAC_Write_JULIAN_0100(hal, 0) (mhal_emac.c:752-766): keep
++	 * [31:16] and bits 7:6, set 0xf015, plus bit 1 for an external PHY.
++	 * For an external (RMII) PHY this is the 0xf017 SSD20xD needs.
++	 */
++	val = macb_readl(bp, MSC313_JULIAN_100);
++	val = (val & 0xffff00c0) | 0xf015 | (ext_phy ? BIT(1) : 0);
++	macb_writel(bp, MSC313_JULIAN_100, val);
++
++	bp->mstar_txq = devm_kcalloc(&pdev->dev, MSC313_TXQ_LEN,
++				     sizeof(*bp->mstar_txq), GFP_KERNEL);
++	if (!bp->mstar_txq)
++		return -ENOMEM;
++
+ 	return at91ether_init(pdev);
+ }
+ 
+@@ -5865,7 +6150,6 @@ static const struct macb_config msc313_config = {
+ 	.clk_init = msc313_clk_init,
+ 	.init = msc313_init,
+ 	.usrio = &at91_default_usrio,
+-	.rm9200_txq_len = 4,
+ };
+ 
+ static const struct macb_config emac_config = {

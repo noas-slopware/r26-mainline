@@ -183,3 +183,31 @@ Caveats:
 - Run 30 (production shim, mode 1) and then plain mainline: both cores, cpufreq-dt at a fixed 1 GHz (as stock), 128 MiB, DAC at high speed, roonbridge/ssh/networkd/chrony/swap active, no failed units.
 - Playback on mainline through RoonBridge (driven via the DMS Roon plugin): `hw:CARD=G20`, S32_LE, 2 ch, 44100 Hz for a 44.1 kHz track, async with feedback.
 - U-Boot only changes `/chosen/bootargs` (its env) and `/memory` (`0x20000000 0x8000000`) in the DTB it loads, both identical to the mainline DTB, so the shim was taken out: `/GustardCore` + `/00` are now the plain mainline kernel and DTB (15:22). The stock pair is on the card as `/GustardCore.stock` and `/00.stock`; going back is copying those two over and rebooting, from mainline itself or through the card reader.
+
+## Runs 31-44 (17:45-23:25): Alpine, a reboot hang, nowayout, the TX corruption, parity, cutover
+- Alpine 3.24.4 (armv7, `alpine/build.sh`) on the card's p2, booted through the shim in mode 2 with the production kernel in the fallback slot. First boot: all services, 13 MB RAM in use (Debian 40, stock 67), the Core reconnected after 19 s, 96 kHz playback.
+- **18:12, the first `reboot` from Alpine hung and the box stayed down until a power cycle.** Alpine's watchdog feeder (BusyBox `watchdog`) does a magic close when OpenRC stops it, and `msc313e_wdt` never called `watchdog_set_nowayout()`, so `CONFIG_WATCHDOG_NOWAYOUT` would have done nothing: the hardware watchdog was off for the rest of the shutdown. Debian never hit this because systemd keeps the watchdog armed through a reboot.
+- Fix: the driver honours `nowayout` (default `CONFIG_WATCHDOG_NOWAYOUT=y`). Proven on the box: `rc-service hw-watchdog stop` -> "nowayout prevents watchdog being stopped!" -> reset exactly 30 s later -> the shim booted the fallback (Debian).
+- The hang itself did not come back: 12 more OpenRC reboots from Alpine (6 in a row on one kernel, then one into each later test kernel and the cutover) and a `reboot -f` all came back in 33-40 s. Netconsole shows the shutdown down to `device_shutdown` (5 s from `reboot` to reset). The cause is unknown; any repeat now ends in a watchdog reset.
+- Getting off a kernel without nowayout safely: `kill -STOP` the feeder (the fd stays open, no magic close) and `reboot -f`.
+- Alpine's `dmesg` service sets the console loglevel to 1, which also mutes netconsole after init. `dmesg -n 8` before a test.
+- In the shim's main slot use `panic=0`: with `panic=3` a panic soft-resets, the shim sees no watchdog flag and boots the same slot again.
+- **The MAC was never stable.** U-Boot makes up a random one at every power-on ("using random MAC address" in its strings) and leaves it in the address registers; soft reboots kept it, a cold boot changed `00:00:5e:00:53:01` to `00:00:5e:00:53:02`. The earlier unique-ID patch never fired because it only ran when macb had no valid address. Now the EMAC derives `00:00:5e:00:53:03` from the SoC's 48-bit unique ID (eFuse regs 0x16-0x18) whenever the DT links it to the eFuse bank.
+- DHCP: ifupdown-ng runs `udhcpc -R`, which releases the lease at shutdown, and the router then allocates by MAC. With the random MAC the address moved (.46 -> .39); with the UID MAC it settles on 192.0.2.60.
+- **TX corruption found and fixed.** Baseline on the old TX code: 300 MiB of random data from the R26 over raw TCP gave +14,814 `TcpInCsumErrors` at the receiver (about 7% of the segments; TCP drops them, the rest are the SSH MAC failures). The completion path took free FIFO slots for finished frames and freed buffers the MAC was still reading. Rewritten after the vendor driver (127-entry TX queue, software room accounting, TAR/TCR through the X32 bank, reclaim from FIFO-used + latched new-queue count, 64-byte aligned or bounce-buffered frames): 3 x 300 MiB TX, 200 MiB over SSH and 300 MiB RX, all with matching sha256 and 0 checksum errors on either side. TX runs at 8.3 MB/s (9.4 before, with the corruption). The statistics counters are read through the X32 bank too and no longer jump in 0x10000 steps.
+- Parity reads (`re/tools/r26peek`, read-only, DEVMEM test kernel):
+
+| What | Register | Value | Verdict |
+|---|---|---|---|
+| UART1_MODE / DMIC_MODE_4 / TEST_IN-OUT (VID pad muxes) | `0x1F203C0C`, `0x1F203C3C`, `0x1F203C48` | 0, 0, 0 | no function on the VID pads |
+| `reg_all_pad_in` | `0x1F203D40` | 0 | clear |
+| pad 49 (VID bit 0) | `0x1F207868` | `0x0011` | output, high |
+| SAR AISEL/OEN, OUT/IN (pad 72, VID bit 1) | `0x1F002844`, `0x1F002848` | `0x3d3d`, `0x0d00` | digital output, low: 900 mV |
+| pad GPIO12 | `0x1F207830` | 0 | output, low, as U-Boot leaves it |
+| pad TTL0 (SD power in the reference design) | `0x1F207880` | `0x0020` | input, nobody drives it |
+| SAR clock gate | `0x1F001C88` bit 5 | 0 | running |
+| L3 bridge flush | `0x1F204414` | `0x0001` | bit 4 (AXI exclusive) clear, the vendor sets it |
+
+- Reading the HDMI/DAC ATOP, display LPLL, MIPI D-PHY and SATA banks (`0x1F224C00`, `0x1F224E00`, `0x1F206600`, `0x1F2A5000`, `0x1F2A4A00-4E00`) stalls the bus on mainline; the watchdog reset the box into the fallback. So the vendor's analog power-down of those blocks is not ported: the banks are not even readable here.
+- Ported: AXI exclusive access on and the MIU pipe flush under a spinlock (all Infinity vendor kernels do both), the SAR GPIO driver holds the SAR clock, a hog keeps GPIO12 (amp-gpio) low. After: L3 bridge `0x0011`, `sar` clock enable count 1, GPIO12 still low, 0 checksum errors over 300 MiB, playback at 96 kHz.
+- **Cutover (23:22): plain U-Boot -> mainline -> Alpine, no shim.** U-Boot forces `root=/dev/mmcblk0p1 rw`; the Alpine kernel (`config/r26-alpine.config`) appends `root=PARTUUID=d13d0903-02 ro` through `CMDLINE_EXTEND`, and the last `root=`/`ro` win. Card p1: `/GustardCore` + `/00` (production), `/GustardCore.debian` (the same kernel with the base command line, boots Debian on p1), `/00.prev`, `/GustardCore.stock` + `/00.stock` (match `stock/SHA256SUMS`), `/GustardCore.prod` (an older mainline build, no local copy). Rebooted twice: back in 34-36 s, the Core connected 11 s after boot.

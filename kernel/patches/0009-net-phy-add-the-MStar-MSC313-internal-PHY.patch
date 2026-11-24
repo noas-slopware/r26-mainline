@@ -1,7 +1,7 @@
 From 0584ef526462d1749836ff859c186cabb1469855 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:55 +0900
-Subject: [PATCH 09/18] net: phy: add the MStar MSC313 internal PHY
+Subject: [PATCH 09/26] net: phy: add the MStar MSC313 internal PHY
 
 Taken from the final state of the linux-chenxing mstar_v6_7_rebase branch
 (https://github.com/linux-chenxing/linux, Daniel Palmer et al.) and ported
@@ -300,6 +300,3 @@ index 0000000000..e8be7a0751
 +};
 +
 +#endif
--- 
-2.56.0
-

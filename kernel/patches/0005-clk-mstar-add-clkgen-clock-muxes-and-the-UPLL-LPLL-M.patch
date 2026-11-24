@@ -1,7 +1,7 @@
 From 2754f08923307fff66a85bc3f74f41325f072363 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:54 +0900
-Subject: [PATCH 05/18] clk: mstar: add clkgen, clock muxes and the
+Subject: [PATCH 05/26] clk: mstar: add clkgen, clock muxes and the
  UPLL/LPLL/MIUPLL
 
 Add the MStar clkgen gate/mux drivers, the PM and SC GP control muxes
@@ -2657,6 +2657,3 @@ index 0000000000..3a82e82768
 +#define MSTAR_MSC313_UPLL_320	1
 +
 +#endif
--- 
-2.56.0
-

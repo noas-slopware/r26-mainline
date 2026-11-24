@@ -1,0 +1,89 @@
+From ad3948677df6cee87383332eb605ecedbb67bd55 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 17:43:18 +0900
+Subject: [PATCH 20/26] ARM: dts: sigmastar: gustard-r26: describe the CPU core
+ regulator
+
+The core supply is a regulator with a 2-bit VID on PAD_UART1_RX (bit 0)
+and PAD_SAR_GPIO1 (bit 1): 850, 900, 950 or 1000 mV (stock DT
+core_voltage node). The vendor kernel sets 900 mV for 1 GHz; mainline
+never drove the pads, so the cores ran at 1 GHz on whatever voltage the
+VID inputs floated to. Describe it as a regulator-gpio, make it the
+cpu-supply of both cores and give the 1 GHz OPP the vendor's 900 mV.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../mstar-infinity2m-ssd202d-gustard-r26.dts  | 36 +++++++++++++++++--
+ 1 file changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+index 6d1718d1f4..2092845f04 100644
+--- a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
++++ b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+@@ -10,6 +10,8 @@
+ 
+ /dts-v1/;
+ #include "mstar-infinity2m-ssd202d.dtsi"
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/gpio/msc313-gpio.h>
+ 
+ / {
+ 	model = "Gustard R26 streamer";
+@@ -29,14 +31,36 @@ chosen {
+ 		bootargs = "panic=3 rootwait root=/dev/mmcblk0p1 rw clk_ignore_unused";
+ 	};
+ 
+-	/* The stock kernel runs both cores at a fixed 1 GHz; do the same. */
++	/*
++	 * CPU core supply: a regulator whose 2-bit VID is driven by two pads
++	 * (stock DT core_voltage: vid_gpios = <49 72>, vid_voltages = 850, 900,
++	 * 950, 1000 mV; VID bit n = vid_gpios[n]). Vendor gpio 49 is
++	 * PAD_UART1_RX, gpio 72 is PAD_SAR_GPIO1. The vendor kernel sets 900 mV
++	 * for 1 GHz; without this the pads are never driven and the core runs
++	 * at whatever voltage they float to.
++	 */
++	vdd_cpu: regulator-vdd-cpu {
++		compatible = "regulator-gpio";
++		regulator-name = "vdd_cpu";
++		regulator-type = "voltage";
++		regulator-min-microvolt = <850000>;
++		regulator-max-microvolt = <1000000>;
++		regulator-boot-on;
++		regulator-always-on;
++		gpios = <&gpio SSD20XD_GPIO_UART1_RX GPIO_ACTIVE_HIGH>,
++			<&sar 1 GPIO_ACTIVE_HIGH>;
++		gpios-states = <1 0>;	/* 900 mV until cpufreq takes over */
++		states = <850000 0x0>, <900000 0x1>, <950000 0x2>, <1000000 0x3>;
++	};
++
++	/* The stock kernel runs both cores at a fixed 1 GHz and 900 mV; do the same. */
+ 	cpu_opp_r26: opp-table-r26 {
+ 		compatible = "operating-points-v2";
+ 		opp-shared;
+ 
+ 		opp-1000000000 {
+ 			opp-hz = /bits/ 64 <1000000000>;
+-			opp-microvolt = <1000000>;
++			opp-microvolt = <900000>;
+ 			clock-latency-ns = <300000>;
+ 		};
+ 	};
+@@ -44,10 +68,18 @@ opp-1000000000 {
+ 
+ &cpu0 {
+ 	operating-points-v2 = <&cpu_opp_r26>;
++	cpu-supply = <&vdd_cpu>;
+ };
+ 
+ &cpu1 {
+ 	operating-points-v2 = <&cpu_opp_r26>;
++	cpu-supply = <&vdd_cpu>;
++};
++
++/* SAR_GPIO1 drives VID bit 1 of the CPU core regulator */
++&sar {
++	compatible = "mstar,msc313-sar-gpio";
++	status = "okay";
+ };
+ 
+ /*

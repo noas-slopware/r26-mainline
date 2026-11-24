@@ -1,0 +1,43 @@
+From 662c6ee9fc2a43e7bd5532e6f2fa9c5b4129fa51 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 22:55:49 +0900
+Subject: [PATCH 21/26] watchdog: msc313e: support nowayout
+
+The driver never called watchdog_set_nowayout(), so CONFIG_WATCHDOG_NOWAYOUT
+had no effect and any userspace feeder could disarm the watchdog with a
+magic close. BusyBox watchdog does exactly that when it is stopped at
+shutdown, which leaves a hang later in the shutdown path with nothing to
+reset the board.
+
+Add the usual nowayout module parameter, defaulting to
+CONFIG_WATCHDOG_NOWAYOUT.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/watchdog/msc313e_wdt.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/watchdog/msc313e_wdt.c b/drivers/watchdog/msc313e_wdt.c
+index cab13f5dca..a1052a4ea6 100644
+--- a/drivers/watchdog/msc313e_wdt.c
++++ b/drivers/watchdog/msc313e_wdt.c
+@@ -26,6 +26,11 @@ static unsigned int timeout;
+ module_param(timeout, int, 0);
+ MODULE_PARM_DESC(timeout, "Watchdog timeout in seconds");
+ 
++static bool nowayout = WATCHDOG_NOWAYOUT;
++module_param(nowayout, bool, 0);
++MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default="
++		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
++
+ struct msc313e_wdt_priv {
+ 	void __iomem *base;
+ 	struct watchdog_device wdev;
+@@ -170,6 +175,7 @@ static int msc313e_wdt_probe(struct platform_device *pdev)
+ 	platform_set_drvdata(pdev, priv);
+ 
+ 	watchdog_init_timeout(&priv->wdev, timeout, dev);
++	watchdog_set_nowayout(&priv->wdev, nowayout);
+ 	watchdog_stop_on_unregister(&priv->wdev);
+ 	watchdog_stop_ping_on_suspend(&priv->wdev);
+ 

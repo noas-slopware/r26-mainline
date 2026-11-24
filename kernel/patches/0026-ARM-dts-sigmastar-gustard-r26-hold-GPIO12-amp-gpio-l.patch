@@ -1,0 +1,42 @@
+From 809748f52b14eda65be632d5949eb453954d3628 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 23:19:49 +0900
+Subject: [PATCH 26/26] ARM: dts: sigmastar: gustard-r26: hold GPIO12
+ (amp-gpio) low
+
+GPIO12 is the reference design's amp-gpio. Gustard's U-Boot drives it low
+at every boot ("gpio clear 52"; index 52 of its pad table is GPIO12, and
+the pad reads output-low under Linux) and nothing else touches it. Add a
+hog so the line is documented and stays low whatever Linux does with the
+GPIO block later.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../mstar-infinity2m-ssd202d-gustard-r26.dts       | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+index 3acd2f132d..942c6103ca 100644
+--- a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
++++ b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+@@ -98,6 +98,20 @@ &pm_uart {
+ 	status = "okay";
+ };
+ 
++/*
++ * GPIO12 is the reference design's amp-gpio. Gustard's U-Boot drives it low
++ * at every boot ("gpio clear 52": index 52 of its pad table is GPIO12) and
++ * nothing else touches it; keep it that way explicitly.
++ */
++&gpio {
++	amp-gpio-hog {
++		gpio-hog;
++		gpios = <SSD20XD_GPIO_GPIO12 GPIO_ACTIVE_HIGH>;
++		output-low;
++		line-name = "amp-gpio";
++	};
++};
++
+ /* eth0: EMAC with the SoC's integrated 10/100 PHY */
+ &emac {
+ 	/* second range: the X32 bank the vendor reads registers below 0x100 through */

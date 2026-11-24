@@ -1,7 +1,7 @@
 From c5eefd7994288e099fb961fa3c2fb25e13182160 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:55 +0900
-Subject: [PATCH 12/18] ARM: dts: sigmastar: update the Infinity2M dtsi from
+Subject: [PATCH 12/26] ARM: dts: sigmastar: update the Infinity2M dtsi from
  linux-chenxing
 
 Bring in the linux-chenxing Infinity2M description (clkgen, muxes,
@@ -2095,6 +2095,3 @@ index 0000000000..41f3051b05
 +#define MSC313_BDMA_P3_SLAVE_PSPI 0x9
 +
 +#endif /* __DT_BINDINGS_DMA_MSC313_BDMA_DMA_H__ */
--- 
-2.56.0
-

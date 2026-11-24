@@ -1,7 +1,7 @@
 From 9e3fdbb77849bbf3d9abc58643a3adfe7c24867b Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 13:26:55 +0900
-Subject: [PATCH 07/18] phy: mstar: add the MSC313 USB PHY with SSD20xD
+Subject: [PATCH 07/26] phy: mstar: add the MSC313 USB PHY with SSD20xD
  bring-up
 
 Add the MStar MSC313 USB PHY (UTMI) driver from linux-chenxing, plus a
@@ -689,6 +689,3 @@ index 0000000000..61c6c59550
 +#define MSTAR_UTMI_REG_CAL_DATA_SHIFT	4
 +
 +static struct reg_field mstar_utmi_pwrctrl_pwrdwn_field = REG_FIELD(REG_PWRCTRL, PWRCTRL_REG_PDN, PWRCTRL_REG_PDN);
--- 
-2.56.0
-

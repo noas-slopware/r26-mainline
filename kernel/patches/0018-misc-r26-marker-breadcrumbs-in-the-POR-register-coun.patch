@@ -1,7 +1,7 @@
 From 10d5f6814fae05ab78b27ef08421687500d8749a Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 24 Nov 2026 15:14:42 +0900
-Subject: [PATCH 18/18] misc: r26-marker: breadcrumbs in the POR register,
+Subject: [PATCH 18/26] misc: r26-marker: breadcrumbs in the POR register,
  count initcalls (test only)
 
 Not for upstream. Write the breadcrumbs into the upper bits of PM POR
@@ -129,6 +129,3 @@ index 46c1fb7c04..1f1d3e1316 100644
  	ret = fn();
  	do_trace_initcall_finish(fn, ret);
  
--- 
-2.56.0
-
