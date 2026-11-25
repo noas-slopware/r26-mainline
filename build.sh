@@ -1,9 +1,9 @@
 #!/bin/bash
-# Build the R26 kernel: stable v7.3.6 + kernel/patches, LLVM, allnoconfig + fragments.
+# Build the R26 kernel: stable v7.3.6 + patches/linux, LLVM, allnoconfig + fragments.
 #   ./build.sh          production kernel (config/r26.config), root on the card's p1
 #   ./build.sh alpine   production kernel with the root on p2 (adds config/r26-alpine.config)
 #   ./build.sh test     test kernel for the r26kexec loader (adds config/r26-test.config
-#                       and the initramfs from initramfs/build.sh)
+#                       and the initramfs from tools/bringup/initramfs/build.sh)
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 src=$here/out/linux
@@ -11,7 +11,7 @@ obj=$here/out/build-${1:-prod}
 if [ ! -d "$src/.git" ]; then
 	git clone --depth 1 --branch v7.3.6 \
 		https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$src"
-	git -C "$src" -c user.name=r26 -c user.email=r26@localhost am -q "$here"/kernel/patches/*.patch
+	git -C "$src" -c user.name=r26 -c user.email=r26@localhost am -q "$here"/patches/linux/*.patch
 fi
 mkdir -p "$obj"
 cfg=$obj/merged.config
@@ -19,7 +19,7 @@ cp "$here/config/r26.config" "$cfg"
 [ "$1" = alpine ] && cat "$here/config/r26-alpine.config" >> "$cfg"
 if [ "$1" = test ]; then
 	cat "$here/config/r26-test.config" >> "$cfg"
-	echo "CONFIG_INITRAMFS_SOURCE=\"$here/initramfs/out/initramfs.list\"" >> "$cfg"
+	echo "CONFIG_INITRAMFS_SOURCE=\"$here/tools/bringup/initramfs/out/initramfs.list\"" >> "$cfg"
 fi
 make -C "$src" -s O="$obj" ARCH=arm LLVM=1 KCONFIG_ALLCONFIG="$cfg" allnoconfig
 while IFS= read -r l; do

@@ -2,7 +2,7 @@
 # Rebuild the 4.9 simulation kernel, derive restart-path addresses, build the
 # simulation loader against them, and run the rehearsal in QEMU vexpress-a15 -smp 2.
 set -e
-R=${R:?set R to the workspace holding sim/, loader/, build/ (see sim/README)}
+R=${R:?set R to the workspace holding sim/, loader/, build/ (see README.md here)}
 S=$R/sim
 TC=$R/toolchains/gcc-arm-8.2-2018.08-x86_64-arm-linux-gnueabihf/bin
 B=$S/build-4.9

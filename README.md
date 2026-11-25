@@ -2,72 +2,103 @@
 
 Mainline Linux on the network streamer inside the Gustard R26 DAC: a SigmaStar SSD202D (Infinity2M,
 2x Cortex-A7 at 1 GHz, 128 MiB). Gustard ships a vendor 4.9.84 kernel and never released its source.
+Port by Noa Himesaka. Not affiliated with Gustard.
 
-The R26 now runs stable **v7.3.6** with this series. The stock U-Boot boots the kernel and DTB straight
-from the SD card, with no shim and nothing written to the on-board flash. The userland is Alpine 3.24,
-and the DAC plays through [raat-endpoint](https://github.com/noas-slopware/raat-endpoint), a native
-RAAT endpoint that replaces RoonBridge. The stock Debian 12 still boots from the same card with the base
-kernel. Current state and open items: [`STATUS.md`](STATUS.md). The full lab log: [`re/FINDINGS.md`](re/FINDINGS.md).
+The R26 runs stable **v7.3.6** with this series: the stock U-Boot boots it straight from the SD card,
+with no shim and nothing written to the on-board flash, and Alpine Linux plays to Roon through
+[raat-endpoint](https://github.com/noas-slopware/raat-endpoint), a native RAAT endpoint that replaces
+RoonBridge. There are Alpine packages (a signed apk repository) and a card image.
+What works and what is open: [`STATUS.md`](STATUS.md).
 
-## Hardware support
+## Quickstart: Alpine on the R26
 
-| Block | Driver | State |
-|---|---|---|
-| Ethernet: EMAC + internal 10/100 PHY | `macb` (MStar path), `msc313` PHY | 100 Mbps full duplex, no corrupted frames (TX queue run as the vendor driver does), counters read through the X32 bank |
-| MAC address | `macb` | derived from the SoC's unique ID; U-Boot makes up a random one at every power-on |
-| USB host + PHY | `ehci-fotg210` (FUSBH200 glue), `phy-msc313-usb` | high speed; the DAC's XMOS (`20b1:3033`) enumerates at 480 Mbps |
-| USB audio | `snd-usb-audio` | bit-perfect, 44.1 to 96 kHz verified |
-| SD card | `sstar-sdio` (new) | high speed, byte-exact reads and writes verified |
-| CPU | SMP, `cpufreq-dt` | both cores, 1 GHz at 900 mV as stock; the core voltage is a GPIO VID regulator, one bit of it a SAR pad (`gpio-msc313-sar`, new) |
-| Watchdog | `msc313e_wdt` | `nowayout`: once userspace opens it, nothing switches it off; it keeps running through a restart |
-| Clocks, pinctrl, GPIO, interrupts, RTC | from linux-chenxing, forward-ported | working |
-| UART0 | `8250_dw` | bound as the console; its pins on the board are unknown, so the output is unverified |
-| Display, SATA, MIPI, audio codec | none | not used on the R26 |
+1. Back up the streamer's microSD card (`dd` of the whole card).
+2. Write `alpine-gustard-r26-<date>.img.zst` from the
+   [latest release](https://github.com/noas-slopware/r26-mainline/releases/latest) to it.
+3. Put your SSH public key in `/root/.ssh/authorized_keys` on the card (ext4, so from a Linux machine).
+4. Boot, `ssh root@<its address>` (hostname `gustard-r26`), and enable the DAC in Roon's audio settings.
 
-## Layout
+The full guide, with growing the partition, updates, recovery and going back:
+[`docs/install.md`](https://github.com/noas-slopware/r26-mainline/blob/docs/docs/install.md).
+It replaces Gustard's own system on the card, Roon only: Tidal Connect, Spotify Connect, AirPlay
+and NAA are not in it.
 
-| Path | What |
-|---|---|
-| `kernel/patches/` | the series on top of stable v7.3.6 (`git am`); 0014 and 0018 are test-only breadcrumb drivers, off in the production config |
-| `config/r26.config` | production fragment, applied on `allnoconfig`, distro-agnostic |
-| `config/r26-alpine.config` | Alpine add-on: the root on the card's second partition |
-| `config/r26-test.config` | extras for loader test kernels only |
-| `build.sh` | fetch v7.3.6, apply the series, build `zImage` and the DTB |
-| `alpine/` | builds the Alpine root filesystem for the R26 |
-| `shim/` | the boot shim used for bring-up and kernel experiments: one `/GustardCore` image with two kernels, picking one per boot from the reset cause, so any failure lands on a known-good kernel |
-| `loader/` | `r26kexec`: start a new kernel from the running stock 4.9 kernel through `/dev/mem`, with the watchdog as a hard deadline back to stock (how the first boots were done) |
-| `initramfs/` | test initramfs: busybox, dropbear, netconsole and UDP logging |
-| `sim/` | QEMU rehearsal of the loader |
-| `re/` | reverse-engineering notes and tools: vendor kernel function matching, the SD host and USB init specs, a read-only SPI NAND dumper, a read-only register peek |
+## Packages
 
-## Building
+`https://noas-slopware.github.io/r26-mainline/alpine/v3.24/gustard-r26` (armv7, Alpine 3.24), mirrored
+at `https://mirror.funami.tech/r26-mainline/alpine/v3.24/gustard-r26`, signed with
+`r26-mainline-1cc0db58.rsa.pub`. On an R26 that already runs Alpine:
 
 ```sh
-./build.sh          # production kernel, root on the card's first partition (stock Debian)
-./build.sh alpine   # production kernel, root on the second partition (set its PARTUUID in config/r26-alpine.config)
-./build.sh test     # loader test kernel (adds config/r26-test.config and the initramfs)
+wget -O /etc/apk/keys/r26-mainline-1cc0db58.rsa.pub \
+    https://noas-slopware.github.io/r26-mainline/alpine/r26-mainline-1cc0db58.rsa.pub
+apk add -X https://noas-slopware.github.io/r26-mainline/alpine/v3.24/gustard-r26 device-gustard-r26-repo
+apk add device-gustard-r26 raat-endpoint
 ```
 
-The output is `out/build-<variant>/arch/arm/boot/zImage` and
-`out/build-<variant>/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dtb`.
-Builds use LLVM (`clang`, `ld.lld`).
+| package | what |
+|---|---|
+| `linux-gustard-r26` | the kernel: stable 7.3.6 + `patches/linux` + `config/r26.config` |
+| `device-gustard-r26` | puts the kernel where U-Boot loads it (`r26-boot-deploy`), the watchdog feeder service; `-repo`: this repository and its key |
+| `raat-endpoint` | the native RAAT (Roon Ready) endpoint, with `raat-endpoint-openrc` |
 
-## Installing
+## Branches
 
-The stock U-Boot loads `/GustardCore` (a plain `zImage`) and `/00` (the DTB) by name from the card's
-first partition. It replaces the DTB's bootargs with its own, `panic=3 rootwait root=/dev/mmcblk0p1 rw
-clk_ignore_unused`, and sets `/memory`. The kernel's built-in command line is appended after that:
-the console and, for Alpine, `root=PARTUUID=... ro`, which wins over U-Boot's `root=`.
+| branch | contents |
+|---|---|
+| `senpai` | this README, `STATUS.md`, `patches/linux/`, `config/`, `userspace/`, `tools/`, `LICENSES/` |
+| `docs` | the install guide, the reverse-engineering notes and tools |
+| `alpine` | the APKBUILDs, the package build and the image build |
+| `ci` | the workflow that builds the packages and publishes the repository on GitHub Pages |
 
-1. Keep the stock pair: copy `/GustardCore` and `/00` to `/GustardCore.stock` and `/00.stock`.
-2. Copy the new `zImage` to `/GustardCore` and the DTB to `/00`, `sync`, reboot.
+The branches are independent histories. Check them out side by side with `git worktree`.
 
-Going back is the same with the stock pair, from the running system or through a card reader.
-The on-board SPI NAND (IPL and U-Boot) is never written by anything here.
+### `senpai`
 
-## Notes
+- `patches/linux/`: 26-patch series on stable `v7.3.6` (`git am`). 0014 and 0018 add test-only
+  boot breadcrumb drivers; the production config leaves them off.
+- `config/r26.config`: the production fragment, applied on `allnoconfig`, distro-agnostic.
+  `config/r26-alpine.config` puts the root on the card's second partition (for keeping Gustard's
+  system on the first); `config/r26-test.config` is for loader test kernels.
+- `build.sh`: fetch v7.3.6, apply the series, build `zImage` and the DTB (`./build.sh`,
+  `./build.sh alpine`, `./build.sh test`). LLVM (`clang`, `ld.lld`).
+- `userspace/`: distribution-neutral sources of what the device package installs:
+  `boot-deploy/r26-boot-deploy`, `openrc/hw-watchdog`.
+- `tools/bringup/`: what the port was brought up with. `loader/` (`r26kexec`: start a new kernel
+  from the running stock 4.9 kernel through `/dev/mem`, with the watchdog as a deadline back to
+  stock), `shim/` (one `/GustardCore` image with two kernels, picking one per boot from the reset
+  cause), `initramfs/` (busybox, dropbear, netconsole), `sim/` (QEMU rehearsal of the loader).
+- `tools/alpine-from-debian/`: an Alpine root built from a running stock Debian, keeping its SSH
+  keys, DHCP client id and Roon identity (the layout with Alpine on the second partition).
 
-- Never put `CONFIG_EXPERT=y` in the fragment: on `allnoconfig` it switches off every default-y
-  EXPERT option, including `ARM_PATCH_PHYS_VIRT`.
-- No vendor binaries, dumps or captures are in this repository.
-- Kernel commits carry `Assisted-by: Claude:claude-opus-5-5`.
+## Building the kernel
+
+```sh
+./build.sh          # root on the card's first partition
+./build.sh alpine   # root on the second partition (set its PARTUUID in config/r26-alpine.config)
+```
+
+Output: `out/build-<variant>/arch/arm/boot/zImage` and
+`out/build-<variant>/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dtb`. The
+stock U-Boot loads them as `/GustardCore` and `/00` from the card's first partition, replaces the
+DTB's bootargs with `panic=3 rootwait root=/dev/mmcblk0p1 rw clk_ignore_unused` and appends nothing;
+the kernel's built-in command line is added after that. Never put `CONFIG_EXPERT=y` in the fragment:
+on `allnoconfig` it switches off every default-y EXPERT option, `ARM_PATCH_PHYS_VIRT` included.
+
+## Authors and credits
+
+- Noa Himesaka: the port, the R26 device tree, the SD host driver, the EMAC, watchdog, regulator and
+  SAR GPIO work, the boot tools, the Alpine packaging. Kernel commits carry
+  `Assisted-by: Claude:claude-opus-5-5`.
+- Daniel Palmer and the [linux-chenxing](https://github.com/linux-chenxing/linux) project: the
+  MStar/SigmaStar clock, pinctrl, GPIO, interrupt, USB, PHY and EMAC drivers and the Infinity2M
+  device tree that this series forward-ports from its `mstar_v6_7_rebase` branch. Their copyright
+  lines are kept in the files, and each such commit says where it comes from.
+- Daniel Palmer and Romain Perier: the mainline MStar watchdog driver the series extends.
+
+No vendor binaries, dumps or captures are in this repository.
+
+## License
+
+By directory, details in [`LICENSES/README.md`](LICENSES/README.md): `patches/linux` and `config`
+GPL-2.0-only, `userspace` MIT, the APKBUILDs per package.

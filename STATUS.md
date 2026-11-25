@@ -1,6 +1,6 @@
 # Status
 
-As of 2026-11-25. Kernel: stable v7.3.6 plus the 26 patches in `kernel/patches/`.
+As of 2026-11-25. Kernel: stable v7.3.6 plus the 26 patches in `patches/linux/`.
 
 ## What runs on the R26
 
@@ -15,6 +15,17 @@ As of 2026-11-25. Kernel: stable v7.3.6 plus the 26 patches in `kernel/patches/`
   RoonBridge disabled (not removed). `/GustardCore.debian` on the card is the same kernel with the
   base command line; copy it over `/GustardCore` and reboot to get Debian. This was checked on the box.
 - **Stock:** `/GustardCore.stock` + `/00.stock`. They match the original card's checksums.
+
+## Packages and image
+
+- The Alpine packages (`linux-gustard-r26`, `device-gustard-r26`, `raat-endpoint`) are built from
+  the `alpine` branch by the `ci` branch's workflow and published as a signed apk repository on
+  GitHub Pages. The kernel package is the same series and fragment as the kernel above, built by
+  Alpine's abuild.
+- The card image (`alpine-gustard-r26-<date>.img.zst`, releases) is made from that repository.
+  It puts Alpine on the card's first partition. That layout with the packaged kernel has not been
+  booted on the box yet: the box itself runs the second-partition layout, with the same kernel
+  series built by `build.sh alpine`.
 
 ## Verified on the box
 
