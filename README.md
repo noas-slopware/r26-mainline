@@ -12,10 +12,11 @@ What works and what is open: [`STATUS.md`](STATUS.md).
 
 ## Quickstart: Alpine on the R26
 
-1. Back up the streamer's microSD card (`dd` of the whole card).
+1. Connect the USB-C service port on the back of the R26 to a Linux machine: the streamer's microSD
+   card shows up as a USB drive. Back it up (`dd` of the whole card).
 2. Write `alpine-gustard-r26-<date>.img.zst` from the
    [latest release](https://github.com/noas-slopware/r26-mainline/releases/latest) to it.
-3. Put your SSH public key in `/root/.ssh/authorized_keys` on the card (ext4, so from a Linux machine).
+3. Put your SSH public key in `/root/.ssh/authorized_keys` on the card.
 4. Boot, `ssh root@<its address>` (hostname `gustard-r26`), and enable the DAC in Roon's audio settings.
 
 The full guide, with growing the partition, updates, recovery and going back:
