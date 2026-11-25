@@ -2,7 +2,7 @@
 maintainer="Noa Himesaka <himesaka@noa.codes>"
 pkgname=raat-endpoint
 pkgver=0.1.0
-pkgrel=0
+pkgrel=1
 pkgdesc="Native RAAT (Roon Ready) audio endpoint for small Linux boxes"
 url="https://github.com/noas-slopware/raat-endpoint"
 arch="all"
@@ -31,5 +31,5 @@ package() {
 	install -dm750 "$pkgdir"/var/lib/raat-endpoint
 }
 sha512sums="
-43f4d121e65b0a1e770594df11ffa177d5aae91f835ed84aa18152dadef0b35b603927b5d955d6bae9c3e0e286910d364866b60ecc2c2d44edd561a07fc13e30  raat-endpoint-0.1.0.tar.gz
+6733b9361d45106d50a87207b6b89baafd92d374f12ad74e7dba74ffde2ef439399d593aa58f34d284ac96ed72172446d10d9e89297d6cc0967db393d87e8741  raat-endpoint-0.1.0.tar.gz
 "
