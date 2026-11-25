@@ -7,8 +7,8 @@ on the streamer's microSD card. Read the whole page first.
 
 - **The card is replaced, the box is not.** The streamer boots from its microSD card: the stock
   bootloader in the on-board flash loads `/GustardCore` (kernel) and `/00` (device tree) from the
-  card's first partition. Nothing here writes to the on-board flash, so going back is putting
-  Gustard's card contents back.
+  card's first partition. Nothing here writes to the on-board flash, so going back is writing
+  Gustard's own card image again.
 - **Roon only.** The image plays to Roon through raat-endpoint (it shows up in Roon like any Roon
   Ready device). Gustard's own system also runs Tidal Connect, Spotify Connect, AirPlay and NAA;
   none of those are in this image.
@@ -32,22 +32,14 @@ on the streamer's microSD card. Read the whole page first.
    Linux machine. Never write to the card while the streamer is running from it. The card itself
    sits in a hinged socket inside; opening the box is only for replacing a dead card.
 
-2. **Back up the whole card**, so you can always go back:
-
-   ```sh
-   sudo dd if=/dev/sdX of=r26-card-backup.img bs=4M status=progress
-   ```
-
-   (`/dev/sdX` is the card; check with `lsblk` before every `dd`.)
-
-3. **Check and write the image:**
+2. **Check and write the image** (`/dev/sdX` is the card; check with `lsblk` before every `dd`):
 
    ```sh
    sha256sum -c --ignore-missing sha256sums
    zstdcat alpine-gustard-r26-<date>.img.zst | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
    ```
 
-4. **Grow the partition** to the whole card (optional; the image is 768 MiB):
+3. **Grow the partition** to the whole card (optional; the image is 768 MiB):
 
    ```sh
    sudo parted /dev/sdX resizepart 1 100%
@@ -58,7 +50,7 @@ on the streamer's microSD card. Read the whole page first.
    Keep the file system's feature set as it is (no `tune2fs -O metadata_csum,64bit`): the stock
    bootloader reads the kernel from it and knows only the older ext4 features.
 
-5. **Put your SSH key on it:**
+4. **Put your SSH key on it:**
 
    ```sh
    sudo mount /dev/sdX1 /mnt
@@ -66,12 +58,12 @@ on the streamer's microSD card. Read the whole page first.
    sudo umount /mnt
    ```
 
-6. **Boot.** Unplug the USB-C cable and power the R26 on. It takes an address by DHCP with the hostname
+5. **Boot.** Unplug the USB-C cable and power the R26 on. It takes an address by DHCP with the hostname
    `gustard-r26`; find it in your router's leases, then `ssh root@<address>`. The first boot makes
    the SSH host keys, so the first login asks you to accept a new key. The MAC address comes from
    the SoC's unique ID and stays the same across boots.
 
-7. **Roon.** In Roon, Settings > Audio: the R26's DAC appears as a new Roon Ready device. Enable it
+6. **Roon.** In Roon, Settings > Audio: the R26's DAC appears as a new Roon Ready device. Enable it
    and name the zone. Taking over the zone RoonBridge had on the stock system is possible by
    copying RoonBridge's identity; see "Installing in place of RoonBridge" in the raat-endpoint README.
 
@@ -104,7 +96,8 @@ sudo umount /mnt
 
 ## Going back to the stock system
 
-Write your backup back: `sudo dd if=r26-card-backup.img of=/dev/sdX bs=4M conv=fsync status=progress`.
+Write Gustard's firmware image for the R26 (from Gustard, e.g. `R26_1v43.img.gz` in their 1.43
+zip) back onto the card: `zcat R26_1v43.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress`.
 
 ## Keeping Gustard's system next to Alpine
 
