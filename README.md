@@ -13,7 +13,7 @@ What works and what is open: [`STATUS.md`](STATUS.md).
 ## Quickstart: Alpine on the R26
 
 1. Connect the USB-C service port on the back of the R26 to a Linux machine: the streamer's microSD
-   card shows up as a USB drive. Back it up (`dd` of the whole card).
+   card shows up as a USB drive.
 2. Write `alpine-gustard-r26-<date>.img.zst` from the
    [latest release](https://github.com/noas-slopware/r26-mainline/releases/latest) to it.
 3. Put your SSH public key in `/root/.ssh/authorized_keys` on the card.
