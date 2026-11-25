@@ -68,6 +68,7 @@ The branches are independent histories. Check them out side by side with `git wo
   from the running stock 4.9 kernel through `/dev/mem`, with the watchdog as a deadline back to
   stock), `shim/` (one `/GustardCore` image with two kernels, picking one per boot from the reset
   cause), `initramfs/` (busybox, dropbear, netconsole), `sim/` (QEMU rehearsal of the loader).
+  The network addresses in them are documentation placeholders (`192.0.2.x`): put in your own.
 - `tools/alpine-from-debian/`: an Alpine root built from a running stock Debian, keeping its SSH
   keys, DHCP client id and Roon identity (the layout with Alpine on the second partition).
 
