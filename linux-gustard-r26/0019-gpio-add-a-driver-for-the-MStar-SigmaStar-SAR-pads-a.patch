@@ -1,0 +1,197 @@
+From f0c7488f8ff77cee22e93df228bb5b72db3f55d3 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 17:43:18 +0900
+Subject: [PATCH 19/26] gpio: add a driver for the MStar/SigmaStar SAR pads as
+ GPIOs
+
+The SAR (ADC) block's four pads, SAR_GPIO0..3, double as GPIOs: per pad
+an analog-select bit, an active-low output enable, and output and input
+bits in two registers of the PM SAR bank (vendor gpio_table.c GPIO71..74,
+mhal_pinmux.c). A pad is switched to digital when it is requested.
+
+The Gustard R26 drives one bit of its CPU core regulator's VID through
+SAR_GPIO1.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpio/Kconfig           |   8 ++
+ drivers/gpio/Makefile          |   1 +
+ drivers/gpio/gpio-msc313-sar.c | 138 +++++++++++++++++++++++++++++++++
+ 3 files changed, 147 insertions(+)
+ create mode 100644 drivers/gpio/gpio-msc313-sar.c
+
+diff --git a/drivers/gpio/Kconfig b/drivers/gpio/Kconfig
+index a48586bb8e..323da25218 100644
+--- a/drivers/gpio/Kconfig
++++ b/drivers/gpio/Kconfig
+@@ -938,6 +938,14 @@ config GPIO_AMD_FCH
+ 	  needs to be provided with platform-specific configuration.
+ 	  (See e.g. CONFIG_PCENGINES_APU2.)
+ 
++config GPIO_MSC313_SAR
++	bool "MStar/SigmaStar SAR pads as GPIOs"
++	depends on ARCH_MSTARV7 || COMPILE_TEST
++	help
++	  Say Y here to use the SAR (ADC) block's pads SAR_GPIO0..3 as GPIOs on
++	  MStar/SigmaStar ARMv7 SoCs. The Gustard R26 drives its CPU core
++	  regulator's VID through one of them.
++
+ config GPIO_MSC313
+ 	bool "MStar MSC313 GPIO support"
+ 	depends on ARCH_MSTARV7 || COMPILE_TEST
+diff --git a/drivers/gpio/Makefile b/drivers/gpio/Makefile
+index dc9e6d643b..310ed4bce3 100644
+--- a/drivers/gpio/Makefile
++++ b/drivers/gpio/Makefile
+@@ -128,6 +128,7 @@ obj-$(CONFIG_GPIO_MPC5200)		+= gpio-mpc5200.o
+ obj-$(CONFIG_GPIO_MPC8XXX)		+= gpio-mpc8xxx.o
+ obj-$(CONFIG_GPIO_MPSSE)		+= gpio-mpsse.o
+ obj-$(CONFIG_GPIO_MSC313)		+= gpio-msc313.o
++obj-$(CONFIG_GPIO_MSC313_SAR)		+= gpio-msc313-sar.o
+ obj-$(CONFIG_GPIO_MT7621)		+= gpio-mt7621.o
+ obj-$(CONFIG_GPIO_MVEBU)		+= gpio-mvebu.o
+ obj-$(CONFIG_GPIO_MXC)			+= gpio-mxc.o
+diff --git a/drivers/gpio/gpio-msc313-sar.c b/drivers/gpio/gpio-msc313-sar.c
+new file mode 100644
+index 0000000000..6a93a856c6
+--- /dev/null
++++ b/drivers/gpio/gpio-msc313-sar.c
+@@ -0,0 +1,138 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MStar/SigmaStar SAR (ADC) block pads used as GPIOs: SAR_GPIO0..3.
++ *
++ * Per pad n, in the PM SAR bank (16-bit registers on a 4-byte stride):
++ *   reg 0x11 bit n      AISEL: 1 = analog (ADC) input, 0 = digital pad
++ *   reg 0x11 bit 8 + n  OEN: output enable, active low
++ *   reg 0x12 bit n      output value
++ *   reg 0x12 bit 8 + n  input value
++ * (vendor gpio_table.c GPIO71..74 and mhal_pinmux.c REG_SAR_AISEL_8BIT).
++ *
++ * Only the GPIO side is handled; a pad becomes digital when it is requested.
++ */
++#include <linux/bits.h>
++#include <linux/clk.h>
++#include <linux/gpio/driver.h>
++#include <linux/io.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/spinlock.h>
++
++#define SAR_REG_AISEL_OEN	0x11
++#define SAR_REG_OUT_IN		0x12
++#define SAR_NGPIO		4
++
++struct msc313_sar_gpio {
++	void __iomem *base;
++	struct gpio_chip gc;
++	raw_spinlock_t lock;
++};
++
++static void sar_rmw(struct msc313_sar_gpio *s, unsigned int reg, u16 mask, u16 val)
++{
++	unsigned long flags;
++	void __iomem *a = s->base + reg * 4;
++
++	raw_spin_lock_irqsave(&s->lock, flags);
++	writew((readw(a) & ~mask) | (val & mask), a);
++	raw_spin_unlock_irqrestore(&s->lock, flags);
++}
++
++static int sar_request(struct gpio_chip *gc, unsigned int off)
++{
++	struct msc313_sar_gpio *s = gpiochip_get_data(gc);
++
++	sar_rmw(s, SAR_REG_AISEL_OEN, BIT(off), 0);	/* digital pad */
++	return 0;
++}
++
++static int sar_get_direction(struct gpio_chip *gc, unsigned int off)
++{
++	struct msc313_sar_gpio *s = gpiochip_get_data(gc);
++
++	return readw(s->base + SAR_REG_AISEL_OEN * 4) & BIT(8 + off) ?
++		GPIO_LINE_DIRECTION_IN : GPIO_LINE_DIRECTION_OUT;
++}
++
++static int sar_direction_input(struct gpio_chip *gc, unsigned int off)
++{
++	struct msc313_sar_gpio *s = gpiochip_get_data(gc);
++
++	sar_rmw(s, SAR_REG_AISEL_OEN, BIT(8 + off), BIT(8 + off));
++	return 0;
++}
++
++static int sar_set(struct gpio_chip *gc, unsigned int off, int val)
++{
++	struct msc313_sar_gpio *s = gpiochip_get_data(gc);
++
++	sar_rmw(s, SAR_REG_OUT_IN, BIT(off), val ? BIT(off) : 0);
++	return 0;
++}
++
++static int sar_direction_output(struct gpio_chip *gc, unsigned int off, int val)
++{
++	struct msc313_sar_gpio *s = gpiochip_get_data(gc);
++
++	sar_set(gc, off, val);	/* value first, then drive */
++	sar_rmw(s, SAR_REG_AISEL_OEN, BIT(8 + off), 0);
++	return 0;
++}
++
++static int sar_get(struct gpio_chip *gc, unsigned int off)
++{
++	struct msc313_sar_gpio *s = gpiochip_get_data(gc);
++
++	return !!(readw(s->base + SAR_REG_OUT_IN * 4) & BIT(8 + off));
++}
++
++static int msc313_sar_gpio_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct msc313_sar_gpio *s;
++	struct clk *clk;
++
++	s = devm_kzalloc(dev, sizeof(*s), GFP_KERNEL);
++	if (!s)
++		return -ENOMEM;
++	s->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(s->base))
++		return PTR_ERR(s->base);
++	raw_spin_lock_init(&s->lock);
++
++	/* the pads live in the SAR block: keep its clock on while we use them */
++	clk = devm_clk_get_optional_enabled(dev, "sar_clk");
++	if (IS_ERR(clk))
++		return dev_err_probe(dev, PTR_ERR(clk), "failed to enable the SAR clock\n");
++
++	s->gc.label = dev_name(dev);
++	s->gc.parent = dev;
++	s->gc.owner = THIS_MODULE;
++	s->gc.base = -1;
++	s->gc.ngpio = SAR_NGPIO;
++	s->gc.request = sar_request;
++	s->gc.get_direction = sar_get_direction;
++	s->gc.direction_input = sar_direction_input;
++	s->gc.direction_output = sar_direction_output;
++	s->gc.get = sar_get;
++	s->gc.set = sar_set;
++
++	return devm_gpiochip_add_data(dev, &s->gc, s);
++}
++
++static const struct of_device_id msc313_sar_gpio_of_match[] = {
++	{ .compatible = "mstar,msc313-sar-gpio" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, msc313_sar_gpio_of_match);
++
++static struct platform_driver msc313_sar_gpio_driver = {
++	.driver = {
++		.name = "msc313-sar-gpio",
++		.of_match_table = msc313_sar_gpio_of_match,
++	},
++	.probe = msc313_sar_gpio_probe,
++};
++builtin_platform_driver(msc313_sar_gpio_driver);

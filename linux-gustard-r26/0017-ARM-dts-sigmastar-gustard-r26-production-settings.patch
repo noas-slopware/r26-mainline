@@ -1,0 +1,83 @@
+From 8c2404befad68f270279fb52dad1110437f5bf58 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 15:14:41 +0900
+Subject: [PATCH 17/26] ARM: dts: sigmastar: gustard-r26: production settings
+
+- bootargs as the stock U-Boot environment gives them, for boot paths
+  that pass this DTB unchanged
+- a one-entry OPP table: both cores at a fixed 1 GHz, as the stock
+  kernel runs them
+- uart0 on the DW APB UART driver: the plain 16550 driver never clears
+  the busy-detect interrupt, which stormed on every shutdown
+- drop the stock CMA reservation; only kernels started from a running
+  stock system need it, and their test DTB adds it
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../mstar-infinity2m-ssd202d-gustard-r26.dts  | 43 ++++++++++++-------
+ 1 file changed, 27 insertions(+), 16 deletions(-)
+
+diff --git a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+index 0ca190d948..6d1718d1f4 100644
+--- a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
++++ b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+@@ -22,32 +22,43 @@ aliases {
+ 
+ 	chosen {
+ 		stdout-path = "serial0:115200n8";
++		/*
++		 * The stock U-Boot replaces this with its env bootargs; the boot
++		 * shim passes the DTB unchanged. Same arguments either way.
++		 */
++		bootargs = "panic=3 rootwait root=/dev/mmcblk0p1 rw clk_ignore_unused";
+ 	};
+ 
+-	reserved-memory {
+-		#address-cells = <1>;
+-		#size-cells = <1>;
+-		ranges;
++	/* The stock kernel runs both cores at a fixed 1 GHz; do the same. */
++	cpu_opp_r26: opp-table-r26 {
++		compatible = "operating-points-v2";
++		opp-shared;
+ 
+-		/*
+-		 * The stock kernel's CMA area, used for its EMAC and USB DMA
+-		 * buffers. Keep it unused so a kernel started straight from a
+-		 * running stock system can't be hit by leftover DMA.
+-		 */
+-		stock_cma: stock-cma@27e00000 {
+-			reg = <0x27e00000 0x200000>;
+-			no-map;
++		opp-1000000000 {
++			opp-hz = /bits/ 64 <1000000000>;
++			opp-microvolt = <1000000>;
++			clock-latency-ns = <300000>;
+ 		};
+ 	};
+ };
+ 
++&cpu0 {
++	operating-points-v2 = <&cpu_opp_r26>;
++};
++
++&cpu1 {
++	operating-points-v2 = <&cpu_opp_r26>;
++};
++
+ /*
+- * uart0: use the plain 16550 binding as mainline's own dtsi does (the
+- * msc313-uart 8250_dw quirk only matters with UART DMA). The pads are left
+- * as the bootloader set them: where they go on the R26 board is unknown.
++ * uart0 is a Synopsys DW APB UART: it needs 8250_dw, which clears the busy
++ * detect interrupt (raised by an LCR write while the UART is busy) that the
++ * plain 16550 driver leaves asserted. The rate comes from clock-frequency;
++ * the pads are left as the bootloader set them (where they go on the R26
++ * board is unknown).
+  */
+ &pm_uart {
+-	compatible = "ns16550a";
++	compatible = "snps,dw-apb-uart";
+ 	clock-frequency = <172000000>;
+ 	/delete-property/ clocks;
+ 	/delete-property/ pinctrl-names;

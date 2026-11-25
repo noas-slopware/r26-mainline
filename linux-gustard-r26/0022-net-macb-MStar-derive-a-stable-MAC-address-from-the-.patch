@@ -1,0 +1,115 @@
+From b7cfd884c0bfa77d3e588b8084fa32ff5c3d4977 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 22:55:49 +0900
+Subject: [PATCH 22/26] net: macb: MStar: derive a stable MAC address from the
+ SoC unique ID
+
+The Gustard R26 has no stored MAC address. Its bootloader makes up a random
+one at every power-on and leaves it in the address registers, which
+macb_get_hwaddr() then picks up as valid, so the board shows up with a new
+MAC (and a new DHCP lease) after every cold boot.
+
+When the DT links the EMAC to the eFuse bank ("sstar,efuse"), derive a
+locally administered unicast address from the SoC's 48-bit unique ID,
+read the way the vendor's msys_read_uuid() does, before falling back to
+the address registers. Point the R26's EMAC at the eFuse bank and widen
+the bank to cover the ID registers.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../mstar-infinity2m-ssd202d-gustard-r26.dts  |  7 +++
+ drivers/net/ethernet/cadence/macb_main.c      | 46 ++++++++++++++++++-
+ 2 files changed, 52 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+index 2092845f04..6e09fb4e3a 100644
+--- a/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
++++ b/arch/arm/boot/dts/sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dts
+@@ -100,9 +100,16 @@ &pm_uart {
+ 
+ /* eth0: EMAC with the SoC's integrated 10/100 PHY */
+ &emac {
++	/* no stored MAC on this board: derive a stable one from the SoC UID */
++	sstar,efuse = <&efuse>;
+ 	status = "okay";
+ };
+ 
++/* cover the unique ID registers (0x16-0x18) */
++&efuse {
++	reg = <0x4000 0x80>;
++};
++
+ /* Third USB port: the DAC's XMOS USB Audio 2.0 interface (20b1:3033) */
+ &usbphy2 {
+ 	compatible = "sstar,ssd20xd-usb-phy", "mstar,msc313-usb-phy";
+diff --git a/drivers/net/ethernet/cadence/macb_main.c b/drivers/net/ethernet/cadence/macb_main.c
+index 18a1b50256..21401b7019 100644
+--- a/drivers/net/ethernet/cadence/macb_main.c
++++ b/drivers/net/ethernet/cadence/macb_main.c
+@@ -39,6 +39,9 @@
+ #include <linux/udp.h>
+ #include <linux/gcd.h>
+ #include <net/pkt_sched.h>
++#include <linux/crc32.h>
++#include <linux/of_address.h>
++#include <linux/unaligned.h>
+ #include <soc/mstar/riuxiu.h>
+ #include "macb.h"
+ 
+@@ -312,6 +315,47 @@ static void macb_get_hwaddr(struct macb *bp)
+ 	eth_hw_addr_random(bp->netdev);
+ }
+ 
++/*
++ * SigmaStar boards with no stored MAC address: the bootloader on the Gustard
++ * R26 makes up a random one at every power-on and leaves it in the address
++ * registers, so the box gets a new MAC (and DHCP lease) each cold boot.
++ * When the DT points at the eFuse bank, derive a stable, per-chip address
++ * from the SoC's 48-bit unique ID instead: locally administered, unicast.
++ * The ID is read the way the vendor's msys_read_uuid() does: clear the bank
++ * select (reg 0x03 bit 8), then regs 0x16-0x18.
++ */
++static bool macb_mac_from_soc_uid(struct macb *bp, struct device_node *np)
++{
++	struct device_node *en = of_parse_phandle(np, "sstar,efuse", 0);
++	u8 uid[6], addr[ETH_ALEN];
++	void __iomem *e;
++	u16 w[3];
++
++	if (!en)
++		return false;
++	e = of_iomap(en, 0);
++	of_node_put(en);
++	if (!e)
++		return false;
++	writew(readw(e + 0x03 * 4) & ~BIT(8), e + 0x03 * 4);
++	w[0] = readw(e + 0x16 * 4);
++	w[1] = readw(e + 0x17 * 4);
++	w[2] = readw(e + 0x18 * 4);
++	iounmap(e);
++	if (!(w[0] | w[1] | w[2]) || (w[0] & w[1] & w[2]) == 0xffff)
++		return false;	/* not programmed */
++
++	put_unaligned_le16(w[0], uid);
++	put_unaligned_le16(w[1], uid + 2);
++	put_unaligned_le16(w[2], uid + 4);
++	addr[0] = 0x02;	/* locally administered, unicast */
++	put_unaligned_le32(crc32_le(~0, uid, sizeof(uid)), addr + 1);
++	addr[5] = uid[0] ^ uid[1] ^ uid[2] ^ uid[3] ^ uid[4] ^ uid[5];
++	eth_hw_addr_set(bp->netdev, addr);
++	dev_info(&bp->pdev->dev, "MAC %pM derived from the SoC unique ID\n", addr);
++	return true;
++}
++
+ static int macb_mdio_wait_for_idle(struct macb *bp)
+ {
+ 	u32 val;
+@@ -6135,7 +6179,7 @@ static int macb_probe(struct platform_device *pdev)
+ 	err = of_get_ethdev_address(np, bp->netdev);
+ 	if (err == -EPROBE_DEFER)
+ 		goto err_out_free_netdev;
+-	else if (err)
++	else if (err && !macb_mac_from_soc_uid(bp, np))
+ 		macb_get_hwaddr(bp);
+ 
+ 	err = of_get_phy_mode(np, &interface);

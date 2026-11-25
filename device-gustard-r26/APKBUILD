@@ -1,0 +1,42 @@
+# Device package for the Gustard R26 streamer: the kernel, the watchdog feeder and the step
+# that puts the kernel where the stock U-Boot loads it.
+maintainer="Noa Himesaka <himesaka@noa.codes>"
+pkgname=device-gustard-r26
+pkgver=1
+pkgrel=0
+pkgdesc="Gustard R26 streamer: kernel deploy and watchdog"
+url="https://github.com/noas-slopware/r26-mainline"
+arch="armv7"
+license="MIT"
+options="!check"
+depends="linux-gustard-r26 busybox openrc"
+install="$pkgname.post-install $pkgname.post-upgrade"
+triggers="$pkgname.trigger=/boot/gustard-r26"
+subpackages="$pkgname-repo:_repo:noarch"
+source="
+	hw-watchdog.initd
+	r26-boot-deploy
+	gustard-r26.list
+	r26-mainline-1cc0db58.rsa.pub
+	"
+
+package() {
+	install -Dm755 "$srcdir"/hw-watchdog.initd "$pkgdir"/etc/init.d/hw-watchdog
+	install -Dm755 "$srcdir"/r26-boot-deploy "$pkgdir"/usr/sbin/r26-boot-deploy
+}
+
+_repo() {
+	pkgdesc="Gustard R26 streamer: this package repository and its signing key"
+	depends=""
+	install -Dm644 "$srcdir"/gustard-r26.list "$subpkgdir"/usr/lib/apk/repositories.d/gustard-r26.list
+	install -Dm644 "$srcdir"/r26-mainline-1cc0db58.rsa.pub \
+		"$subpkgdir"/usr/lib/apk/keys/r26-mainline-1cc0db58.rsa.pub
+	install -Dm644 "$srcdir"/r26-mainline-1cc0db58.rsa.pub \
+		"$subpkgdir"/etc/apk/keys/r26-mainline-1cc0db58.rsa.pub
+}
+sha512sums="
+2202fd80d678d363faa557b5ec3f80a98dae3c829ab2139b855aa366caee5d96ca9b65fc30456a900b357dbe98ee7747e3bc17ca1de98398c1b57b94fb8d660c  hw-watchdog.initd
+20cdfb277c7709ae80b47568d68a86ecf54e208d7aa9f0fb0aadb147999ea5eaf4edff0c202a35df4d7de59a40eedd59cc55c5af21a9ce47805f68465673f171  r26-boot-deploy
+fa8c8b86879f3ece8dd8a994fbc7096c3b98c4ed2fa91762017e727b96e4cbb75dba3b60f1757206ed13834e0c26237ae180411c9025267cfd879fb602b4100d  gustard-r26.list
+3f3ce672be79881e67ac653a4dfdc32df32a6c4c83d6baf542afbb840b2636d9a8cba6c3bac9f25030186a7cd9d0f9e4b3bc867cd629b099773f7947c738da52  r26-mainline-1cc0db58.rsa.pub
+"

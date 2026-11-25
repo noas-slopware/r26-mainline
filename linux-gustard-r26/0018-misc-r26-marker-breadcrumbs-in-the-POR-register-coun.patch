@@ -1,0 +1,131 @@
+From 10d5f6814fae05ab78b27ef08421687500d8749a Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 15:14:42 +0900
+Subject: [PATCH 18/26] misc: r26-marker: breadcrumbs in the POR register,
+ count initcalls (test only)
+
+Not for upstream. Write the breadcrumbs into the upper bits of PM POR
+reg1, which only a power-on clears, so they survive the watchdog or
+software reset back into the stock system. During boot the value is the
+number of initcalls started (hooked into do_one_initcall()), afterwards
+a heartbeat.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/misc/r26-marker.c | 78 +++++++++++++++++++++++++++++++--------
+ init/main.c               |  6 +++
+ 2 files changed, 68 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/misc/r26-marker.c b/drivers/misc/r26-marker.c
+index 5da611291a..ef98e95dd0 100644
+--- a/drivers/misc/r26-marker.c
++++ b/drivers/misc/r26-marker.c
+@@ -1,29 +1,75 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * TEST ONLY (Gustard R26 bring-up): write boot-stage breadcrumbs into the
+- * watchdog bank's dummy register (WDT_DUMMY_REG_1, 0x1F006004), which the
+- * test loader reads back from the stock system after the watchdog reset.
++ * TEST ONLY (Gustard R26 bring-up): boot-stage breadcrumbs that survive a
++ * watchdog or software reset, read back from the stock system afterwards.
++ *
++ * They live in the upper byte of PM POR reg1 (0x1F000C04). That bank is only
++ * cleared by power-on; the vendor uses just bit0 of this register (stock soft
++ * reboot flag), which is left untouched here.
++ *   during initcalls: bits 1-15 = number of initcalls started so far, so the
++ *     value names the initcall that was running (n-th entry of the vmlinux
++ *     initcall table, __initcall_start..__initcall_end);
++ *   after the last one: bit 15 set, bits 1-14 = heartbeat, +1 every 4 s.
+  */
+ #include <linux/init.h>
++#include <linux/export.h>
+ #include <linux/io.h>
++#include <linux/spinlock.h>
++#include <linux/workqueue.h>
+ 
+-#define R26_MARKER_PHYS	0x1f006004
++#define R26_MARKER_PHYS	0x1f000c04
+ 
+-static void r26_mark(u16 v)
++static void __iomem *reg;
++static DEFINE_RAW_SPINLOCK(lock);
++static unsigned int ncalls, beat;
++
++static void r26_write(u16 v)
++{
++	unsigned long flags;
++
++	if (!reg)
++		return;
++	raw_spin_lock_irqsave(&lock, flags);
++	writew((readw(reg) & 1) | (v & 0xfffe), reg);
++	raw_spin_unlock_irqrestore(&lock, flags);
++}
++
++/* called by do_one_initcall() before every initcall */
++void r26_marker_initcall(void)
+ {
+-	void __iomem *p = ioremap(R26_MARKER_PHYS, 2);
++	ncalls++;
++	r26_write(ncalls << 1);
++}
++
++/* test-only probe points: 0x4000 | n << 1 (initcall counts stay below 0x2000) */
++void r26_marker_point(unsigned int n)
++{
++	r26_write(0x4000 | (n << 1));
++}
++EXPORT_SYMBOL_GPL(r26_marker_point);
+ 
+-	if (p) {
+-		writew(v, p);
+-		iounmap(p);
+-	}
++static void r26_beat(struct work_struct *w);
++static DECLARE_DELAYED_WORK(beat_work, r26_beat);
++
++static void r26_beat(struct work_struct *w)
++{
++	beat++;
++	r26_write(0x8000 | (beat << 1));
++	schedule_delayed_work(&beat_work, 4 * HZ);
++}
++
++static int __init r26_mark_early(void)
++{
++	reg = ioremap(R26_MARKER_PHYS, 2);
++	r26_write(ncalls << 1);
++	return 0;
++}
++
++static int __init r26_mark_late(void)
++{
++	schedule_delayed_work(&beat_work, 4 * HZ);
++	return 0;
+ }
+ 
+-static int __init r26_mark_early(void)  { r26_mark(0x5204); return 0; }
+-static int __init r26_mark_core(void)   { r26_mark(0x5205); return 0; }
+-static int __init r26_mark_device(void) { r26_mark(0x5206); return 0; }
+-static int __init r26_mark_late(void)   { r26_mark(0x5207); return 0; }
+ early_initcall(r26_mark_early);
+-core_initcall(r26_mark_core);
+-device_initcall(r26_mark_device);
+ late_initcall_sync(r26_mark_late);
+diff --git a/init/main.c b/init/main.c
+index 46c1fb7c04..1f1d3e1316 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -1359,6 +1359,12 @@ int __init_or_module do_one_initcall(initcall_t fn)
+ 		return -EPERM;
+ 
+ 	do_trace_initcall_start(fn);
++#ifdef CONFIG_R26_MARKER
++	{
++		extern void r26_marker_initcall(void);
++		r26_marker_initcall();
++	}
++#endif
+ 	ret = fn();
+ 	do_trace_initcall_finish(fn, ret);
+ 

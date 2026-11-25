@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# SPDX-License-Identifier: MIT
+# Feed the SoC watchdog. The kernel arms it with nowayout, so once this has opened it nothing
+# can switch it off again: if this stops being scheduled (a hang anywhere, also late in a
+# shutdown), the board resets 30 s after the last feed. The kernel feeds it on its own for the
+# first 120 s after boot (WATCHDOG_OPEN_TIMEOUT), so this has to start before that.
+description="Feed the hardware watchdog (busybox watchdog)"
+supervisor=supervise-daemon
+command=/sbin/watchdog
+command_args="-F -T 30 -t 10 /dev/watchdog"
+respawn_delay=1
+respawn_max=0
+
+depend() {
+	keyword -docker -lxc -podman -prefix -systemd-nspawn -vserver -wsl
+}

@@ -1,0 +1,131 @@
+# Linux for the Gustard R26 streamer (SigmaStar SSD202D): stable 7.3.6 plus the
+# r26-mainline series (patches/linux on the senpai branch of noas-slopware/r26-mainline;
+# the same files are next to this APKBUILD) and the production config fragment
+# (config/r26.config there), applied on allnoconfig as the series was tested.
+#
+# The stock U-Boot loads /GustardCore and /00 from the card's first partition and passes
+# "root=/dev/mmcblk0p1 rw" itself. Two images are built, differing only in the built-in
+# command line that is appended after U-Boot's:
+#   zImage          "... ro"                     root on the first partition (the image)
+#   zImage-root-p2  "... root=/dev/mmcblk0p2 ro"  root on the second partition, for cards
+#                                                 that keep the stock Debian on the first
+# device-gustard-r26 copies the right one to /GustardCore (r26-boot-deploy).
+maintainer="Noa Himesaka <himesaka@noa.codes>"
+pkgname=linux-gustard-r26
+pkgver=7.3.6
+pkgrel=0
+pkgdesc="Linux for the Gustard R26 streamer (SigmaStar SSD202D)"
+url="https://github.com/noas-slopware/r26-mainline"
+arch="armv7"
+license="GPL-2.0-only"
+options="!strip !check !tracedeps"
+makedepends="bc bison clang diffutils findutils flex lld llvm openssl-dev perl python3 xz"
+source="https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-$pkgver.tar.xz
+	config-gustard-r26.fragment
+	0001-mfd-syscon-add-use-raw-spinlock-property.patch
+	0002-gpio-msc313-add-SSD20xD-interrupts-and-register-lock.patch
+	0003-irqchip-add-SigmaStar-SSD20xD-GPI-and-MStar-PM-inter.patch
+	0004-pinctrl-mstar-add-MStar-SigmaStar-pin-controllers.patch
+	0005-clk-mstar-add-clkgen-clock-muxes-and-the-UPLL-LPLL-M.patch
+	0006-clocksource-msc313e-set-the-divider-for-timer0-too.patch
+	0007-phy-mstar-add-the-MSC313-USB-PHY-with-SSD20xD-bring-.patch
+	0008-usb-ehci-add-MStar-SigmaStar-FUSBH200-glue-and-a-por.patch
+	0009-net-phy-add-the-MStar-MSC313-internal-PHY.patch
+	0010-net-macb-add-MStar-SigmaStar-EMAC-support.patch
+	0011-mmc-add-a-SigmaStar-SSD20xD-SD-host-controller-drive.patch
+	0012-ARM-dts-sigmastar-update-the-Infinity2M-dtsi-from-li.patch
+	0013-ARM-dts-sigmastar-add-the-Gustard-R26-streamer.patch
+	0014-misc-add-Gustard-R26-boot-stage-breadcrumbs-test-onl.patch
+	0015-usb-ehci-fotg210-don-t-touch-the-UHC-before-the-MSta.patch
+	0016-watchdog-msc313e-keep-running-through-a-restart.patch
+	0017-ARM-dts-sigmastar-gustard-r26-production-settings.patch
+	0018-misc-r26-marker-breadcrumbs-in-the-POR-register-coun.patch
+	0019-gpio-add-a-driver-for-the-MStar-SigmaStar-SAR-pads-a.patch
+	0020-ARM-dts-sigmastar-gustard-r26-describe-the-CPU-core-.patch
+	0021-watchdog-msc313e-support-nowayout.patch
+	0022-net-macb-MStar-derive-a-stable-MAC-address-from-the-.patch
+	0023-net-macb-MStar-read-the-statistics-counters-through-.patch
+	0024-net-macb-MStar-run-the-TX-queue-the-way-the-vendor-d.patch
+	0025-ARM-mstar-keep-AXI-exclusive-access-on-and-serialise.patch
+	0026-ARM-dts-sigmastar-gustard-r26-hold-GPIO12-amp-gpio-l.patch
+	"
+builddir="$srcdir/linux-$pkgver"
+_dtb=sigmastar/mstar-infinity2m-ssd202d-gustard-r26.dtb
+_cmdline_base="console=ttyS0,115200 earlycon"
+
+_make() {
+	make -C "$builddir" O="$srcdir/build" ARCH=arm LLVM=1 \
+		KBUILD_BUILD_VERSION="$pkgrel" KBUILD_BUILD_USER=alpine KBUILD_BUILD_HOST=gustard-r26 "$@"
+}
+
+# allnoconfig with the fragment, then a check that every option of it stuck (allnoconfig
+# silently drops what it cannot satisfy)
+_config() { # <command line>
+	sed "s|^CONFIG_CMDLINE=.*|CONFIG_CMDLINE=\"$1\"|" "$srcdir"/config-gustard-r26.fragment \
+		> "$srcdir"/fragment
+	_make KCONFIG_ALLCONFIG="$srcdir"/fragment allnoconfig >/dev/null
+	local l bad=0
+	while IFS= read -r l; do
+		case "$l" in
+		CONFIG_*=n|'#'*|'') ;;
+		CONFIG_*) grep -qxF "$l" "$srcdir"/build/.config || { echo "did not stick: $l"; bad=1; } ;;
+		esac
+	done < "$srcdir"/fragment
+	return $bad
+}
+
+prepare() {
+	default_prepare
+	mkdir -p "$srcdir"/build
+}
+
+build() {
+	unset LDFLAGS
+	# root from U-Boot (first partition), mounted read-only first so fsck can run
+	_config "$_cmdline_base ro"
+	_make zImage dtbs
+	cp "$srcdir"/build/arch/arm/boot/zImage "$srcdir"/zImage
+	cp "$srcdir"/build/include/config/kernel.release "$srcdir"/kernel.release
+	# the same kernel with the root on the second partition: only CONFIG_CMDLINE changes, so
+	# this is an incremental build of the few objects that use it
+	_config "$_cmdline_base root=/dev/mmcblk0p2 ro"
+	_make zImage
+	cp "$srcdir"/build/arch/arm/boot/zImage "$srcdir"/zImage-root-p2
+}
+
+package() {
+	install -Dm644 "$srcdir"/zImage "$pkgdir"/boot/gustard-r26/zImage
+	install -Dm644 "$srcdir"/zImage-root-p2 "$pkgdir"/boot/gustard-r26/zImage-root-p2
+	install -Dm644 "$srcdir"/build/arch/arm/boot/dts/$_dtb "$pkgdir"/boot/gustard-r26/gustard-r26.dtb
+	install -Dm644 "$srcdir"/kernel.release "$pkgdir"/usr/share/kernel/gustard-r26/kernel.release
+}
+sha512sums="
+2fe38d23748aaf916a15e57b1e3ac44191d70a1cd006dc1a1fc2e2ae4827275bc36cecf2a3d45e11cc979da85ab33cbfbc8d1270da3738929fa8032527a410ff  linux-7.3.6.tar.xz
+5fa573e3628b23c86266faa0269b7ba8008b19c24a53b86e8a22b8932db6b1c6fa4ce001e10c6f675735656cd449bc99749771a1e6d7f8bb0e0fcab1447a6876  config-gustard-r26.fragment
+439b20f301ee510fb241f947235b4a1a93e6df8540625c5777d1c60d4cf20ad16128b0ef1a61a9a3eaee8fd06d9e02e632685b9b5865a24bfe92ba9820ccfd08  0001-mfd-syscon-add-use-raw-spinlock-property.patch
+cc4e0b1b219069944e7f684fa7f8dd550bcaff5c563ce18e033667c115559a33c505a6731d9edf621a9b8f3a38e529d73a7640e6275df91e8dd1a4abe41ff0ea  0002-gpio-msc313-add-SSD20xD-interrupts-and-register-lock.patch
+f47d1a80a4fa1ad56981aa77071f31c6abb63df153329f49333bd4fa271e3947a0dde8597768090d38311a40afb8a6819da788a863b542e01ea7334de13bae23  0003-irqchip-add-SigmaStar-SSD20xD-GPI-and-MStar-PM-inter.patch
+95e3a04ac144b317c80b3f42d20dccf1b40eebc20af07ae6c8622b22f55dc07d5408459802aea90a08aa984c57755da569ce2a1c6cb3351441758afacbf72043  0004-pinctrl-mstar-add-MStar-SigmaStar-pin-controllers.patch
+f5b0ff7e24bbea962fad95ec64b28c4ea6a81eb76c1c2beb1bf9fe9a0211a4f99a0648c65ab7212db7d865e009f47d0846ad439e7e342455fe2b355f08057681  0005-clk-mstar-add-clkgen-clock-muxes-and-the-UPLL-LPLL-M.patch
+92ba6553d50187dadd218024b1d1db0901f58639085b7ace54235a80bc41c8b773c2f96feafe1379715f812f0cf23ded677414713d02dc62caecde31932d849d  0006-clocksource-msc313e-set-the-divider-for-timer0-too.patch
+8b5dd01b1c28847c758942824572ce59fc193290d4316a1d59742da7e95c3123e40b3380ed0a3b6fcd8c452dc5411c422aab777ca7ea64d38b8dbbda64ed04e1  0007-phy-mstar-add-the-MSC313-USB-PHY-with-SSD20xD-bring-.patch
+9e34a1250efcf42681cc14843bb1ab657ff11c2afc787ce84ed461f715b2ebdc3a3d803b224dedf12c7ef747f5e7951b602f29d0934a30822769bf91911b3907  0008-usb-ehci-add-MStar-SigmaStar-FUSBH200-glue-and-a-por.patch
+e40aa97e29ce41642cae764680842a86a7bd3cc3fa59748d1c4b59e3e54af29d6a63b2d84ba4e9a10c79b7d955e59d3658fd35620129f24c7da0aa965af8a6be  0009-net-phy-add-the-MStar-MSC313-internal-PHY.patch
+7f0304eac16dedb4d353e3834500a2af87ca89753792a946d9b67e8c8b0f19a7b4aa99d609afc94b542ab07557183bc3bbf453ae7ec04f2a7af8e9ecc7017682  0010-net-macb-add-MStar-SigmaStar-EMAC-support.patch
+c5bf64e1eb40da2194adaa209393d00739120bcc4c585a55aedde927ccede03ca66eb2483dec6d5dec8054aca509e5d48422517704e4e93d2ff6b6452283913e  0011-mmc-add-a-SigmaStar-SSD20xD-SD-host-controller-drive.patch
+03c9af1048d7fb0c5d4abfae2dec186a46f8de152950d5379541af053a0a7269f79cd209f0a2079fc56dc20bba8a86654e5d9000fef45fb7cadac8dc57c92fc3  0012-ARM-dts-sigmastar-update-the-Infinity2M-dtsi-from-li.patch
+7129e67232ed2ad772d555dd35d49cfc95721bce544fe078bcf8ca14a05c2cffa279cef7f79c08b67c86fb599a2d658d42c762cf593deca92d78df377f4f9151  0013-ARM-dts-sigmastar-add-the-Gustard-R26-streamer.patch
+0fbd2d534b9667b362b464fefc409431766d20e9c89fcc4d2a345937e64d85ba4260bb9818719f141e5f59bc0d3fb3b579cfca4bcc37d46133fcf947f9c7d76f  0014-misc-add-Gustard-R26-boot-stage-breadcrumbs-test-onl.patch
+c4e3f2cb59ab2478b77b9d915410646f8ca5a1d10b1be570558eeca916b902e41afa235859e37038ee8d5d05b8086d9f844ba0d669e211e3c3126e1cd3cc7f12  0015-usb-ehci-fotg210-don-t-touch-the-UHC-before-the-MSta.patch
+d94dbef162f41c2ca17a7d625164614d4c2d5d10ca4ff82b9281cdfbf8b599c8f82b724440bed843cf4dd413b3a6b57c3eb8d3fe6231a5379ede519b2321ab9c  0016-watchdog-msc313e-keep-running-through-a-restart.patch
+50180ef4d2a0d62693971990286f70974074779935792a914b54eec32ff72daf28ec139a4766a437c93478aa70142fd5e6bfd40201ef04f56d6765b6afaaaa9b  0017-ARM-dts-sigmastar-gustard-r26-production-settings.patch
+5941bbcb9d28418a5c0298bb674c6f9a906c9cab12a1ffadec02e9a15066c0e02cb02be6e6fe895f6416bacbff932534de1149520ab7bd70ee292e525c2bfca3  0018-misc-r26-marker-breadcrumbs-in-the-POR-register-coun.patch
+6847226a545e8905b921026aae30d511e3ed2ec8a2fb07c755b830229926e98712819769472810534df20c7fa52f2537824fa2e7a4f0dcc9f76d2e00a39a0443  0019-gpio-add-a-driver-for-the-MStar-SigmaStar-SAR-pads-a.patch
+8b5c6958921697132e6f99ccd30db6e234e5c30bbfab19ac6f35a9a1d32bf1c6692c1279822c0e0057c6c391e0152c79d377fc47bc108b30828c76333b1c310b  0020-ARM-dts-sigmastar-gustard-r26-describe-the-CPU-core-.patch
+827c800d61fabc5faef6f51936776b70339cfe08173a7ca8f4575075b5dc8975df124d92f56ad55428b38d73103ad9a25f3e6cbfc33a11814b7f1e54369c465d  0021-watchdog-msc313e-support-nowayout.patch
+fcd19b0143fe6ad0100ec24a31444eb66bab1b3a0d1140c24c518eba6ad7db3ba3b3b6409073ab9ee4544a0a2526dc5dfb6b4a889aed816b85bb81dd305ee68e  0022-net-macb-MStar-derive-a-stable-MAC-address-from-the-.patch
+45dc0f02447368411e454fad68ce7a7dabca98cccc7396f6256bbb1f1b5910650c6a94797864dc7af0c1bf1d5e788e9f6829693f2ca534e7c26c6316f4918870  0023-net-macb-MStar-read-the-statistics-counters-through-.patch
+ff524c2d094315c547b7c42c813f9dd566be545b1dd78f83c3f3ec61f1a79ac1f57203c4e80a76b230a717b3fcbd18e4b1f55bad82cef81dec92ceec2124c484  0024-net-macb-MStar-run-the-TX-queue-the-way-the-vendor-d.patch
+677a85685b4d33b05685210afe1972fc902b71741b466f98483f7cb68098c1b8eef933532707fcd68039f39779ef8972938089f286a0c26602ee54d3c8ab053e  0025-ARM-mstar-keep-AXI-exclusive-access-on-and-serialise.patch
+51efc1d75d253ad0228f9e787f56b102aa399d6bf20b8987a7051d8f33bad74236274f46dc449e4570d28d354b58edc84a371d4acf03ce1df956ae586ca74b38  0026-ARM-dts-sigmastar-gustard-r26-hold-GPIO12-amp-gpio-l.patch
+"

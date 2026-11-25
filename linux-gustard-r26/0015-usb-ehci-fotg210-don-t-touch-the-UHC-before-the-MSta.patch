@@ -1,0 +1,73 @@
+From 6e75207d994687e9b47759cfad8315f873b5117b Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 24 Nov 2026 15:14:41 +0900
+Subject: [PATCH 15/26] usb: ehci-fotg210: don't touch the UHC before the MStar
+ USB bring-up
+
+The probe read the capability register to locate the operational
+registers before fotg210_start_ehci() ran. On MStar/SigmaStar the UHC
+is only reachable once the USBC has released it from reset and enabled
+its XIU path (done by phy_init(), in the vendor order), and an access
+before that stalls the bus. After a cold boot through the stock U-Boot
+the SSD202D hung right there; started from a running vendor kernel the
+bring-up was already done, which hid it.
+
+Map the operational registers in fotg210_start_ehci() after phy_init(),
+through the MStar accessors.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/usb/host/ehci-fotg210.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/usb/host/ehci-fotg210.c b/drivers/usb/host/ehci-fotg210.c
+index fa06220627..41fa08e23d 100644
+--- a/drivers/usb/host/ehci-fotg210.c
++++ b/drivers/usb/host/ehci-fotg210.c
+@@ -266,7 +266,7 @@ static void fotg210_start_ehci(struct platform_device *pdev)
+ 	struct usb_hcd *hcd = platform_get_drvdata(pdev);
+ 	struct ehci_hcd *ehci = hcd_to_ehci(hcd);
+ 	struct fotg210_ehci_priv *fotg210_ehci = hcd_to_fotg210_ehci_priv(hcd);
+-	struct fotg210_regs *regs = (void *) ehci->regs;
++	struct fotg210_regs *regs;
+ 	u32 value;
+ 
+ 	fotg210_start_clock(fotg210_ehci);
+@@ -294,6 +294,17 @@ static void fotg210_start_ehci(struct platform_device *pdev)
+ 			dev_err(&pdev->dev, "phy init failed: %d\n", err);
+ 	}
+ 
++	/*
++	 * Only now is the UHC reachable: on MStar the USBC has to take it out
++	 * of reset and enable its XIU path first (phy_init above, the vendor
++	 * order), and any UHC access before that stalls the bus. That is the
++	 * state after a cold boot; a bootloader or kernel that already ran the
++	 * USB bring-up hides it.
++	 */
++	ehci->regs = (void __iomem *)(hcd->regs +
++		HC_LENGTH(ehci, ehci_readl(ehci, &ehci->caps->hc_capbase)));
++	regs = (void *)ehci->regs;
++
+ 	if (ehci->fusbh200) {
+ 		value = ehci_readl(ehci, &regs->bmcsr);
+ 		ehci_writel(ehci, (value & ~BMCSR_VBUS_OFF) | BMCSR_INT_POLARITY,
+@@ -354,7 +365,6 @@ static int ehci_fotg210_drv_probe(struct platform_device *pdev)
+ 	struct usb_hcd *hcd;
+ 	int retval;
+ 	int irq;
+-	int len;
+ 
+ 	if (usb_disabled())
+ 		return -ENODEV;
+@@ -401,10 +411,8 @@ static int ehci_fotg210_drv_probe(struct platform_device *pdev)
+ 		fotg210_ehci->pclk = NULL;
+ 
+ 	ehci = hcd_to_ehci(hcd);
+-	/* registers start at offset 0x0 */
++	/* registers start at offset 0x0; the operational ones are mapped in fotg210_start_ehci() */
+ 	ehci->caps = hcd->regs;
+-	len = HC_LENGTH(ehci, ehci_readl(ehci, &ehci->caps->hc_capbase));
+-	ehci->regs = (void __iomem *)(hcd->regs + len);
+ 
+ 	if (dev->of_node && of_device_is_compatible(dev->of_node,
+ 			"faraday,fotg210"))

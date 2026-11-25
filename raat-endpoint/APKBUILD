@@ -1,0 +1,35 @@
+# Native RAAT (Roon Ready) audio endpoint, in place of RoonBridge.
+maintainer="Noa Himesaka <himesaka@noa.codes>"
+pkgname=raat-endpoint
+pkgver=0.1.0
+pkgrel=0
+pkgdesc="Native RAAT (Roon Ready) audio endpoint for small Linux boxes"
+url="https://github.com/noas-slopware/raat-endpoint"
+arch="all"
+license="GPL-3.0-or-later AND MIT"
+makedepends="alsa-lib-dev linux-headers"
+subpackages="$pkgname-openrc"
+source="$pkgname-$pkgver.tar.gz::https://github.com/noas-slopware/raat-endpoint/archive/refs/tags/v$pkgver.tar.gz"
+builddir="$srcdir/$pkgname-$pkgver/src"
+
+build() {
+	make TARGET=host CC="${CC:-cc}" OPT="$CFLAGS" LDFLAGS="$LDFLAGS"
+}
+
+check() {
+	# the unit tests; the replay test needs captures that are not published
+	build/host/test_stream
+}
+
+package() {
+	install -Dm755 build/host/raat-endpoint "$pkgdir"/usr/bin/raat-endpoint
+	# the packaging files are written for a manual install into /usr/local/bin
+	sed 's|/usr/local/bin/raat-endpoint|/usr/bin/raat-endpoint|' ../packaging/raat-endpoint.openrc \
+		> "$srcdir"/raat-endpoint.initd
+	install -Dm755 "$srcdir"/raat-endpoint.initd "$pkgdir"/etc/init.d/raat-endpoint
+	install -Dm644 ../packaging/raat-endpoint.confd "$pkgdir"/etc/conf.d/raat-endpoint
+	install -dm750 "$pkgdir"/var/lib/raat-endpoint
+}
+sha512sums="
+43f4d121e65b0a1e770594df11ffa177d5aae91f835ed84aa18152dadef0b35b603927b5d955d6bae9c3e0e286910d364866b60ecc2c2d44edd561a07fc13e30  raat-endpoint-0.1.0.tar.gz
+"

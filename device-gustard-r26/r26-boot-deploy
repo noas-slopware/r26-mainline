@@ -1,0 +1,56 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# r26-boot-deploy: put linux-gustard-r26's kernel and DTB where the stock U-Boot loads them,
+# /GustardCore and /00 in the root of the card's first partition, keeping the pair that was
+# there as /GustardCore.old and /00.old.
+#
+# U-Boot always passes root=/dev/mmcblk0p1, so the kernel image has to match the partition
+# this system runs from:
+#   root on mmcblk0p1  zImage          into / of this system
+#   root on mmcblk0p2  zImage-root-p2  into / of the first partition (mounted for the copy)
+#   anything else      nothing is touched (a card U-Boot would not boot this system from)
+# When this does not run on an R26 (building an image in a chroot), it writes the first
+# layout into the root it runs in.
+set -eu
+src=/boot/gustard-r26
+[ -f "$src/zImage" ] && [ -f "$src/gustard-r26.dtb" ] || exit 0
+
+say() { echo "r26-boot-deploy: $*"; }
+
+on_r26=false
+grep -qs 'gustard,r26' /proc/device-tree/compatible && on_r26=true
+
+mnt=
+cleanup() { [ -z "$mnt" ] || { umount "$mnt" 2>/dev/null || true; rmdir "$mnt" 2>/dev/null || true; }; }
+trap cleanup EXIT
+
+if $on_r26; then
+	rootdev=$(readlink -f "/sys/dev/block/$(mountpoint -d /)" 2>/dev/null) || rootdev=
+	case "${rootdev##*/}" in
+	mmcblk0p1) img=zImage; dest= ;;
+	mmcblk0p2)
+		img=zImage-root-p2
+		mnt=$(mktemp -d /run/r26-boot.XXXXXX)
+		mount -t ext4 /dev/mmcblk0p1 "$mnt"
+		dest=$mnt
+		;;
+	*)
+		say "the root is ${rootdev##*/}, not the card's first or second partition: not deploying"
+		exit 0
+		;;
+	esac
+else
+	img=zImage; dest=
+fi
+
+copy() { # <from> <to>: replace <to> atomically, the old one kept as <to>.old
+	if [ -f "$2" ] && cmp -s "$1" "$2"; then return 0; fi
+	[ ! -f "$2" ] || cp -p "$2" "$2.old"
+	cp "$1" "$2.new"
+	sync
+	mv -f "$2.new" "$2"
+}
+copy "$src/$img" "$dest/GustardCore"
+copy "$src/gustard-r26.dtb" "$dest/00"
+sync
+say "$img -> ${dest:-}/GustardCore, gustard-r26.dtb -> ${dest:-}/00 ($(cat /usr/share/kernel/gustard-r26/kernel.release 2>/dev/null))"

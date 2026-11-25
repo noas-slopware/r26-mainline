@@ -1,0 +1,4 @@
+#!/bin/sh
+rc-update -q add hw-watchdog sysinit 2>/dev/null || true
+/usr/sbin/r26-boot-deploy || true
+exit 0
