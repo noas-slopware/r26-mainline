@@ -1,0 +1,232 @@
+# SPDX-License-Identifier: MIT
+# Builds the Alpine packages of the alpine branch for armv7 (Alpine's own abuild in an armv7
+# Alpine container: tools/abuild-docker.sh there, natively on an arm64 runner, qemu-user only on
+# hosts without AArch32) and
+# publishes them as a signed apk repository on GitHub Pages and on YuruMirror:
+#   https://noas-slopware.github.io/r26-mainline/alpine/v3.24/gustard-r26/armv7/APKINDEX.tar.gz
+#   https://mirror.funami.tech/r26-mainline/alpine/v3.24/gustard-r26/armv7/APKINDEX.tar.gz
+# (after linux-hiby-rs6's nura-packages.yml, scaled down to three packages).
+#
+# Only packages whose build is not published yet are built (or all of them with force):
+# .github/alpine/repo.py gives every package a hash of its directory, the Alpine version and the
+# build script, and compares it with built.json next to the published APKINDEX. The others are
+# taken from the live site, so a run that only changes raat-endpoint does not rebuild the kernel.
+#
+# A push to the alpine branch does not run this file by itself; the schedule and a dispatch
+# (gh workflow run alpine-packages.yml --ref ci) do.
+name: Alpine packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild every package, even if the published build is current
+        type: boolean
+        default: false
+      alpine_ref:
+        description: Commit or branch of the alpine branch to build
+        type: string
+        default: alpine
+  schedule:
+    - cron: "37 4 * * *"
+  push:
+    branches: [ci]
+
+concurrency:
+  group: alpine-packages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  ALPINE_VERSION: "3.24"
+  KEY_NAME: r26-mainline-1cc0db58.rsa
+  SITE_URL: https://noas-slopware.github.io/r26-mainline
+  REPO_PATH: alpine/v3.24/gustard-r26/armv7
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      alpine_sha: ${{ steps.sha.outputs.sha }}
+      build: ${{ steps.plan.outputs.build }}
+      reuse: ${{ steps.plan.outputs.reuse }}
+      any: ${{ steps.plan.outputs.any }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.alpine_ref || 'alpine' }}
+          path: alpine
+      - id: sha
+        run: echo "sha=$(git -C alpine rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - id: plan
+        env:
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          args=()
+          [ "$FORCE" != true ] || args+=(--force)
+          python3 -I .github/alpine/repo.py plan --alpine alpine --site "$SITE_URL" "${args[@]}"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with: { ref: "${{ needs.plan.outputs.alpine_sha }}", path: alpine }
+      # Most of these runners execute armv7 natively (AArch32 at EL0); a qemu handler registered
+      # in binfmt_misc would take over every 32-bit binary and make the kernel build several times
+      # slower, so qemu is only set up on a host that cannot run armv7 itself.
+      - name: armv7, natively or through qemu
+        id: armv7
+        run: |
+          if docker run --rm --platform linux/arm/v7 alpine:${ALPINE_VERSION} true 2>/dev/null; then
+            echo "native=true" >> "$GITHUB_OUTPUT"; echo "armv7 runs natively"
+          else
+            echo "native=false" >> "$GITHUB_OUTPUT"; echo "no AArch32 here: qemu"
+          fi
+      - if: steps.armv7.outputs.native == 'false'
+        uses: docker/setup-qemu-action@v3
+        with: { platforms: arm }
+      - name: Runner
+        run: nproc; free -g; df -h /
+      - name: Restore ccache and distfiles
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/ccache
+            ${{ runner.temp }}/distfiles
+          key: alpine-build-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: alpine-build-
+      - name: Published packages the builds may need
+        env:
+          REUSE: ${{ needs.plan.outputs.reuse }}
+        run: |
+          d=$RUNNER_TEMP/repo/gustard-r26/armv7
+          mkdir -p "$d"
+          for f in $(jq -r '.[]' <<< "$REUSE"); do
+            curl -fsSL -o "$d/$f" "$SITE_URL/$REPO_PATH/$f"
+          done
+          ls -l "$d"
+          touch "$RUNNER_TEMP/marker"
+      - name: Build
+        env:
+          R26_REPO_PRIVKEY: ${{ secrets.R26_REPO_PRIVKEY }}
+          BUILD: ${{ needs.plan.outputs.build }}
+        run: |
+          [ -n "$R26_REPO_PRIVKEY" ] || { echo "::error::R26_REPO_PRIVKEY is not set"; exit 1; }
+          umask 077
+          printf '%s\n' "$R26_REPO_PRIVKEY" > "$RUNNER_TEMP/$KEY_NAME"
+          umask 022
+          # an index over the published packages taken over, so the builds can install them
+          d=$RUNNER_TEMP/repo/gustard-r26/armv7
+          if compgen -G "$d/*.apk" >/dev/null; then
+            .github/alpine/index.sh "$d" "$RUNNER_TEMP/$KEY_NAME" "gustard-r26 (published)"
+          fi
+          for p in $(jq -r '.[]' <<< "$BUILD"); do
+            start=$(date +%s)
+            R26_PRIVKEY=$RUNNER_TEMP/$KEY_NAME R26_CCACHE=$RUNNER_TEMP/ccache R26_DISTFILES=$RUNNER_TEMP/distfiles \
+              alpine/tools/abuild-docker.sh "$RUNNER_TEMP/repo" "$p"
+            echo "- \`$p\`: $(( ($(date +%s) - start) / 60 )) min" >> "$GITHUB_STEP_SUMMARY"
+          done
+          rm -f "$RUNNER_TEMP/$KEY_NAME"
+          mkdir -p "$RUNNER_TEMP/new"
+          find "$RUNNER_TEMP/repo/gustard-r26/armv7" -name '*.apk' -newer "$RUNNER_TEMP/marker" \
+            -exec cp '{}' "$RUNNER_TEMP/new/" ';'
+          ls -l "$RUNNER_TEMP/new"
+      - name: Save ccache and distfiles
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ runner.temp }}/ccache
+            ${{ runner.temp }}/distfiles
+          key: alpine-build-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: ${{ runner.temp }}/new/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  # Pages replaces the whole site on every deployment: the published files of every package that
+  # was not rebuilt plus this run's builds, indexed and signed, with built.json and the key.
+  publish:
+    needs: [plan, build]
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: pages-site
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with: { ref: "${{ needs.plan.outputs.alpine_sha }}", path: alpine }
+      - uses: actions/download-artifact@v4
+        with:
+          name: apks
+          path: ${{ runner.temp }}/new
+      - name: Merge, index and sign
+        env:
+          R26_REPO_PRIVKEY: ${{ secrets.R26_REPO_PRIVKEY }}
+          ALPINE_SHA: ${{ needs.plan.outputs.alpine_sha }}
+        run: |
+          site=$RUNNER_TEMP/site
+          repo=$site/$REPO_PATH
+          python3 -I .github/alpine/repo.py merge --alpine alpine --site "$SITE_URL" \
+            --new "$RUNNER_TEMP/new" --out "$repo"
+          umask 077
+          printf '%s\n' "$R26_REPO_PRIVKEY" > "$RUNNER_TEMP/$KEY_NAME"
+          umask 022
+          .github/alpine/index.sh "$repo" "$RUNNER_TEMP/$KEY_NAME" "gustard-r26 ${ALPINE_SHA:0:12}"
+          rm -f "$RUNNER_TEMP/$KEY_NAME"
+          cp "keys/$KEY_NAME.pub" "$site/alpine/"
+          sed -e "s|@KEY_NAME@|$KEY_NAME|g" -e "s|@SITE_URL@|$SITE_URL|g" \
+            -e "s|@ALPINE@|$ALPINE_VERSION|g" -e "s|@ALPINE_SHA@|$ALPINE_SHA|g" \
+            .github/alpine/index.html > "$site/index.html"
+          find "$site" -type f | sort
+          {
+            echo "## Published"
+            echo
+            echo "$(wc -l < "$repo/packages.txt") packages, $(du -sh "$site" | cut -f1), alpine $ALPINE_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ runner.temp }}/site
+      - id: deploy
+        uses: actions/deploy-pages@v5
+
+  # YuruMirror gets the same files: what publish deployed, or the live site when this run deployed
+  # nothing (skips without the mirror secrets).
+  mirror:
+    needs: [plan, publish]
+    if: >-
+      always() && needs.plan.result == 'success'
+      && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Tailscale workload identity federation
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/mirror
+        with:
+          deployed: ${{ needs.publish.result == 'success' }}
+          site-url: ${{ env.SITE_URL }}
+          ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          ts-audience: ${{ secrets.TS_AUDIENCE }}
+          ssh-host: ${{ secrets.SSH_HOST }}
+          ssh-user: ${{ secrets.SSH_USER }}
+          ssh-key: ${{ secrets.SSH_KEY }}
+          remote-dir: ${{ secrets.REMOTE_DIR }}

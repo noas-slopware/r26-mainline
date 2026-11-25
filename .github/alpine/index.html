@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>r26-mainline: Alpine packages</title>
+<style>
+body { font: 16px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; color: #1b1b1f; background: #fff; }
+code, pre { font: 14px/1.4 ui-monospace, monospace; background: #f2f2f5; border-radius: 4px; }
+code { padding: 0 .25em; } pre { padding: .75rem; overflow-x: auto; }
+a { color: #3757c9; }
+@media (prefers-color-scheme: dark) { body { color: #e6e6ea; background: #17171a; } code, pre { background: #26262b; } a { color: #8aa4ff; } }
+</style>
+</head>
+<body>
+<h1>Alpine packages for the Gustard R26</h1>
+<p>An apk repository for Alpine Linux @ALPINE@ (armv7) on the network streamer of the Gustard R26 DAC:
+the kernel, the device package and <a href="https://github.com/noas-slopware/raat-endpoint">raat-endpoint</a>.
+Sources and instructions: <a href="https://github.com/noas-slopware/r26-mainline">noas-slopware/r26-mainline</a>.</p>
+<p>Mirrored at <a href="https://mirror.funami.tech/r26-mainline/alpine/">mirror.funami.tech/r26-mainline/alpine</a>. On an R26 running Alpine:</p>
+<pre>wget -O /etc/apk/keys/@KEY_NAME@.pub @SITE_URL@/alpine/@KEY_NAME@.pub
+apk add -X @SITE_URL@/alpine/v@ALPINE@/gustard-r26 device-gustard-r26-repo
+apk add device-gustard-r26 raat-endpoint</pre>
+<p><code>device-gustard-r26-repo</code> adds this repository and its key for good, so <code>apk upgrade</code> keeps the packages current.</p>
+<ul>
+<li><a href="alpine/v@ALPINE@/gustard-r26/armv7/packages.txt">package list</a></li>
+<li><a href="alpine/v@ALPINE@/gustard-r26/armv7/built.json">built.json</a> (what each package was built from)</li>
+<li><a href="alpine/@KEY_NAME@.pub">signing key</a></li>
+</ul>
+<p>Built from the <code>alpine</code> branch at <a href="https://github.com/noas-slopware/r26-mainline/tree/@ALPINE_SHA@"><code>@ALPINE_SHA@</code></a>.</p>
+</body>
+</html>
