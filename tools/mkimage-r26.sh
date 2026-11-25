@@ -55,11 +55,13 @@ docker run --rm --privileged --platform linux/arm/v7 \
 	alpine:"$ver" sh -euc '
 	apk -q add e2fsprogs sfdisk >/dev/null
 	# the root-owned parts never outlive the container
-	trap "umount /w/root/proc /w/root/dev 2>/dev/null; rm -rf /w/root /w/fs.ext4" EXIT
+	trap "umount /w/root/proc 2>/dev/null || true; umount /w/root/dev 2>/dev/null || true; rm -rf /w/root /w/fs.ext4" EXIT
 	R=/w/root
 	mkdir -p $R/etc/apk/keys $R/dev $R/proc
 	cp /src/device-gustard-r26/$KEY /etc/apk/keys/
 	cp /src/device-gustard-r26/$KEY $R/etc/apk/keys/
+	# Alpine release keys too: the new root has no alpine-keys yet
+	cp /etc/apk/keys/*.pub $R/etc/apk/keys/
 	[ ! -f /localkey.rsa.pub ] || { cp /localkey.rsa.pub /etc/apk/keys/; cp /localkey.rsa.pub $R/etc/apk/keys/; }
 	cat > $R/etc/apk/repositories <<EOF
 https://dl-cdn.alpinelinux.org/alpine/v$VER/main
@@ -67,7 +69,12 @@ https://dl-cdn.alpinelinux.org/alpine/v$VER/community
 EOF
 	mount -t devtmpfs dev $R/dev
 	mount -t proc proc $R/proc
-	apk --root $R --initdb --arch armv7 --no-cache -X "$R26_REPO" --update-cache add \
+	# every repository on the command line: with --initdb, apk does not read
+	# etc/apk/repositories (of the new root) for this first install
+	apk --root $R --initdb --arch armv7 --no-cache --update-cache \
+		-X https://dl-cdn.alpinelinux.org/alpine/v$VER/main \
+		-X https://dl-cdn.alpinelinux.org/alpine/v$VER/community \
+		-X "$R26_REPO" add \
 		alpine-base mdevd-openrc openssh-server chrony e2fsprogs tzdata \
 		device-gustard-r26 device-gustard-r26-repo raat-endpoint raat-endpoint-openrc
 	umount $R/proc $R/dev
