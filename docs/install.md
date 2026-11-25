@@ -66,7 +66,7 @@ on the streamer's microSD card. Read the whole page first.
    sudo umount /mnt
    ```
 
-6. **Boot.** Put the card back and power the R26 on. It takes an address by DHCP with the hostname
+6. **Boot.** Unplug the USB-C cable and power the R26 on. It takes an address by DHCP with the hostname
    `gustard-r26`; find it in your router's leases, then `ssh root@<address>`. The first boot makes
    the SSH host keys, so the first login asks you to accept a new key. The MAC address comes from
    the SoC's unique ID and stays the same across boots.
