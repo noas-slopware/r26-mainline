@@ -6,7 +6,7 @@ Alpine Linux packages and the SD card image for the Gustard R26 streamer, built 
 | package | version | what |
 |---|---|---|
 | `linux-gustard-r26` | 7.3.6-r0 | stable Linux 7.3.6 plus the 26-patch series (the same files as `patches/linux` on the `senpai` branch) with `config/r26.config` from there, on `allnoconfig`. Two images that differ only in the built-in command line: `zImage` (root on the card's first partition) and `zImage-root-p2` (root on the second, for cards that keep the stock Debian on the first) |
-| `device-gustard-r26` | 1-r0 | `r26-boot-deploy` and its apk trigger (puts the kernel and DTB where the stock U-Boot loads them, `/GustardCore` and `/00`, keeping the old pair as `.old`), the `hw-watchdog` OpenRC service (BusyBox `watchdog` on the kernel's nowayout watchdog). Subpackage `-repo`: this repository and its signing key |
+| `device-gustard-r26` | 1-r1 | `r26-boot-deploy` and its apk trigger (puts the kernel and DTB where the stock U-Boot loads them, `/GustardCore` and `/00`, keeping the old pair as `.old`), the `hw-watchdog` OpenRC service (BusyBox `watchdog` on the kernel's nowayout watchdog). Subpackage `-repo`: this repository and its signing key |
 | `raat-endpoint` | 0.1.0-r0 | [raat-endpoint](https://github.com/noas-slopware/raat-endpoint) v0.1.0, the native RAAT (Roon Ready) endpoint, with its OpenRC service in `raat-endpoint-openrc` |
 
 The packages are published as a signed apk repository by the workflow on the `ci` branch:

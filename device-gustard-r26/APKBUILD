@@ -3,7 +3,7 @@
 maintainer="Noa Himesaka <himesaka@noa.codes>"
 pkgname=device-gustard-r26
 pkgver=1
-pkgrel=0
+pkgrel=1
 pkgdesc="Gustard R26 streamer: kernel deploy and watchdog"
 url="https://github.com/noas-slopware/r26-mainline"
 arch="armv7"
@@ -28,11 +28,11 @@ package() {
 _repo() {
 	pkgdesc="Gustard R26 streamer: this package repository and its signing key"
 	depends=""
-	install -Dm644 "$srcdir"/gustard-r26.list "$subpkgdir"/usr/lib/apk/repositories.d/gustard-r26.list
+	# apk-tools 3 on Alpine 3.24 reads repositories.d and keys from /etc/apk and /lib/apk
+	# (not /usr/lib/apk: 3.24 is not /usr-merged)
+	install -Dm644 "$srcdir"/gustard-r26.list "$subpkgdir"/lib/apk/repositories.d/gustard-r26.list
 	install -Dm644 "$srcdir"/r26-mainline-1cc0db58.rsa.pub \
-		"$subpkgdir"/usr/lib/apk/keys/r26-mainline-1cc0db58.rsa.pub
-	install -Dm644 "$srcdir"/r26-mainline-1cc0db58.rsa.pub \
-		"$subpkgdir"/etc/apk/keys/r26-mainline-1cc0db58.rsa.pub
+		"$subpkgdir"/lib/apk/keys/r26-mainline-1cc0db58.rsa.pub
 }
 sha512sums="
 2202fd80d678d363faa557b5ec3f80a98dae3c829ab2139b855aa366caee5d96ca9b65fc30456a900b357dbe98ee7747e3bc17ca1de98398c1b57b94fb8d660c  hw-watchdog.initd
