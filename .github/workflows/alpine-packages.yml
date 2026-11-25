@@ -159,16 +159,8 @@ jobs:
     needs: [plan, build]
     if: needs.build.result == 'success'
     runs-on: ubuntu-24.04
-    concurrency:
-      group: pages-site
-      cancel-in-progress: false
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
@@ -204,16 +196,32 @@ jobs:
       - uses: actions/upload-pages-artifact@v5
         with:
           path: ${{ runner.temp }}/site
+
+  # In its own job, as in GitHub's Pages starter workflows: deploy-pages run in the same job right
+  # after the upload often finds no github-pages artifact yet (actions/deploy-pages#451).
+  deploy:
+    needs: publish
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: pages-site
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
       - id: deploy
         uses: actions/deploy-pages@v5
 
   # YuruMirror gets the same files: what publish deployed, or the live site when this run deployed
   # nothing (skips without the mirror secrets).
   mirror:
-    needs: [plan, publish]
+    needs: [plan, deploy]
     if: >-
       always() && needs.plan.result == 'success'
-      && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+      && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -222,7 +230,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/mirror
         with:
-          deployed: ${{ needs.publish.result == 'success' }}
+          deployed: ${{ needs.deploy.result == 'success' }}
           site-url: ${{ env.SITE_URL }}
           ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           ts-audience: ${{ secrets.TS_AUDIENCE }}
