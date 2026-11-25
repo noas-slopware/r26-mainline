@@ -17,7 +17,7 @@ on the streamer's microSD card. Read the whole page first.
 
 ## You need
 
-- A Linux machine with a microSD card reader (the card's file system is ext4).
+- A Linux machine and a USB-C cable (the card's file system is ext4, so it has to be Linux).
 - `zstd`, `sha256sum`, and for growing the partition `parted` and `e2fsprogs`.
 - Your SSH public key: the image has no password and no other way in.
 - The image from the
@@ -26,9 +26,11 @@ on the streamer's microSD card. Read the whole page first.
 
 ## Steps
 
-1. **Get to the card.** It sits in a hinged socket inside the streamer (slide the lid to OPEN and
-   flip it up). The R26's USB-C service port also shows the card as USB mass storage (a Genesys
-   GL `05e3:0752` reader); never write to it while the streamer is running from it.
+1. **Connect the card.** No need to open the box or take the card out: the USB-C service port on
+   the back of the R26 shows the card as a USB drive (a Genesys GL `05e3:0752` reader behind a hub;
+   the same port carries the front-panel MCU's UART for its firmware updates). Connect it to your
+   Linux machine. Never write to the card while the streamer is running from it. The card itself
+   sits in a hinged socket inside; opening the box is only for replacing a dead card.
 
 2. **Back up the whole card**, so you can always go back:
 
@@ -92,7 +94,7 @@ The image already has this repository (`device-gustard-r26-repo`). A new kernel 
 the bootloader loads it (`r26-boot-deploy`, run by the package's trigger) and keeps the previous
 pair as `/GustardCore.old` and `/00.old`.
 
-**If a new kernel does not boot**, put the card in a reader and copy the old pair back:
+**If a new kernel does not boot**, connect the USB-C service port and copy the old pair back:
 
 ```sh
 sudo mount /dev/sdX1 /mnt
