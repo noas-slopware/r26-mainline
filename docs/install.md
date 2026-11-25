@@ -28,9 +28,9 @@ on the streamer's microSD card. Read the whole page before you start.
 
 1. **Connect the card.** No need to open the box or pull the card out. The USB-C service port on
    the back of the R26 shows the card as a USB drive (a Genesys GL `05e3:0752` reader behind a hub,
-   and the same port also carries the front-panel MCU's UART for its firmware updates). Connect it to
-   your Linux machine. Never write to the card while the streamer is running from it. The card
-   itself sits in a hinged socket inside, so opening the box is only for replacing a dead card.
+   and the same port also carries the front-panel MCU's UART for its firmware updates). Power the R26
+   off, then connect it to your Linux machine. The card itself sits in a hinged socket inside, so
+   opening the box is only for replacing a dead card.
 
 2. **Check and write the image.** Replace `/dev/sdX` with your card device (check with `lsblk`
    before every `dd`):
@@ -87,7 +87,8 @@ This repository is already set up in the image (`device-gustard-r26-repo`). When
 the package trigger runs `r26-boot-deploy` to put the new one where the bootloader loads it and
 keeps the previous pair as `/GustardCore.old` and `/00.old`.
 
-**If a new kernel doesn't boot**, plug in the USB-C service port and copy the old pair back:
+**If a new kernel doesn't boot**, power the R26 off, connect the USB-C service port to your Linux
+machine and copy the old pair back:
 
 ```sh
 sudo mount /dev/sdX1 /mnt
@@ -97,8 +98,8 @@ sudo umount /mnt
 
 ## Going back to the stock system
 
-Grab Gustard's firmware image for the R26 (from Gustard, e.g. `R26_1v43.img.gz` in their 1.43
-zip) and write it back onto the card with `zcat R26_1v43.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress`.
+Grab [Gustard's firmware image for the R26](https://www.gustard.com/?page_id=8956) (e.g.
+`R26_1v43.img.gz` in their 1.43 zip) and write it back onto the card with `zcat R26_1v43.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress`.
 
 ## Keeping Gustard's system next to Alpine
 
